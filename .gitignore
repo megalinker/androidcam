@@ -1,0 +1,24 @@
+# Android / Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/captures/
+*.iml
+.DS_Store
+
+# Windows build
+windows/build/
+windows/out/
+windows/*.user
+windows/.vs/
+
+# FFmpeg SDK (download per windows/README.md — do not commit)
+windows/third_party/ffmpeg/
+
+# Keys / signing
+*.keystore
+*.jks
+*.pfx
+*.cer

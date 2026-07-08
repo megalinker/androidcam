@@ -1,0 +1,5 @@
+<resources>
+    <!-- Framework theme so the scaffold builds without pulling in the Material dependency.
+         Swap for Theme.Material3.DayNight.NoActionBar once you add com.google.android.material. -->
+    <style name="Theme.PhoneCam" parent="@android:style/Theme.Material.Light.NoActionBar" />
+</resources>

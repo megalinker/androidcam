@@ -1,0 +1,12 @@
+<resources>
+    <string name="app_name">PhoneCam</string>
+    <string name="mode_both">Camera + Mic</string>
+    <string name="mode_camera">Camera only</string>
+    <string name="mode_mic">Mic only</string>
+    <string name="quality">Quality</string>
+    <string name="start">Start streaming</string>
+    <string name="stop">Stop streaming</string>
+    <string name="switch_camera">Switch camera (front/back)</string>
+    <string name="notif_channel">PhoneCam streaming</string>
+    <string name="notif_title">PhoneCam is streaming</string>
+</resources>
