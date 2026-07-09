@@ -89,11 +89,10 @@ public class PhoneCamGui : Form
         Font = new Font("Segoe UI", 9.5f);
 
         // Left control column
-        var title = new Label { Text = "PhoneCam", Font = new Font("Segoe UI Semibold", 17f), ForeColor = Fg, Location = new Point(20, 16), AutoSize = true };
-        var sub = new Label { Text = "Your phone as a webcam", ForeColor = Sub, Location = new Point(22, 50), AutoSize = true };
-        Controls.Add(title); Controls.Add(sub);
+        var title = new Label { Text = "PhoneCam", Font = new Font("Segoe UI Semibold", 17f), ForeColor = Fg, Location = new Point(20, 18), AutoSize = true };
+        Controls.Add(title);
 
-        AddSection("Connect", 84);
+        AddSection("Connect", 72);
         rbUsb = Radio("USB cable", 22, 108, true);
         rbWifi = Radio("Wi-Fi", 22, 134, false);
         tbIp = new TextBox { Location = new Point(96, 132), Width = 150, Enabled = false, BackColor = Card, ForeColor = Fg, BorderStyle = BorderStyle.FixedSingle };
