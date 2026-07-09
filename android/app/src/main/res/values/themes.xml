@@ -1,5 +1,18 @@
-<resources>
-    <!-- Framework theme so the scaffold builds without pulling in the Material dependency.
-         Swap for Theme.Material3.DayNight.NoActionBar once you add com.google.android.material. -->
-    <style name="Theme.PhoneCam" parent="@android:style/Theme.Material.Light.NoActionBar" />
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Clean, cohesive dark theme (matches the Windows app). -->
+    <style name="Theme.PhoneCam" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/pc_primary</item>
+        <item name="colorOnPrimary">@color/pc_on_primary</item>
+        <item name="colorSurface">@color/pc_surface</item>
+        <item name="colorSurfaceContainer">@color/pc_surface</item>
+        <item name="colorSurfaceContainerHigh">@color/pc_surface2</item>
+        <item name="colorOnSurface">@color/pc_text</item>
+        <item name="colorOnSurfaceVariant">@color/pc_muted</item>
+        <item name="colorOutline">@color/pc_outline</item>
+        <item name="android:colorBackground">@color/pc_bg</item>
+        <item name="android:windowBackground">@color/pc_bg</item>
+        <item name="android:statusBarColor">@color/pc_bg</item>
+        <item name="android:navigationBarColor">@color/pc_bg</item>
+    </style>
 </resources>

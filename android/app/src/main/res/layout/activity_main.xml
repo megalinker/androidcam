@@ -1,86 +1,156 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/pc_bg">
 
-    <LinearLayout
+    <com.google.android.material.appbar.MaterialToolbar
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:padding="24dp">
+        android:layout_height="?attr/actionBarSize"
+        android:background="@color/pc_bg"
+        app:title="PhoneCam"
+        app:titleTextColor="@color/pc_text"
+        app:titleCentered="false" />
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/app_name"
-            android:textSize="24sp"
-            android:textStyle="bold"
-            android:paddingBottom="16dp" />
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:fillViewport="true">
 
-        <RadioGroup
-            android:id="@+id/modeGroup"
+        <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="wrap_content">
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingHorizontal="20dp"
+            android:paddingBottom="28dp">
 
-            <RadioButton
-                android:id="@+id/modeBoth"
+            <TextView style="@style/PcSectionLabel" android:text="MODE" />
+
+            <com.google.android.material.button.MaterialButtonToggleGroup
+                android:id="@+id/modeGroup"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:checked="true"
-                android:text="@string/mode_both" />
+                app:singleSelection="true"
+                app:selectionRequired="true">
 
-            <RadioButton
-                android:id="@+id/modeCamera"
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/modeBoth" style="@style/PcSegment"
+                    android:layout_width="0dp" android:layout_weight="1"
+                    android:text="Cam + Mic" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/modeCamera" style="@style/PcSegment"
+                    android:layout_width="0dp" android:layout_weight="1"
+                    android:text="Camera" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/modeMic" style="@style/PcSegment"
+                    android:layout_width="0dp" android:layout_weight="1"
+                    android:text="Mic" />
+            </com.google.android.material.button.MaterialButtonToggleGroup>
+
+            <TextView style="@style/PcSectionLabel" android:text="QUALITY" android:layout_marginTop="20dp" />
+
+            <com.google.android.material.textfield.TextInputLayout
+                android:id="@+id/qualityLayout"
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+
+                <com.google.android.material.textfield.MaterialAutoCompleteTextView
+                    android:id="@+id/qualityInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="none"
+                    android:textColor="@color/pc_text" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/startBtn"
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:layout_marginTop="24dp"
+                android:text="Start streaming"
+                android:textSize="16sp"
+                app:cornerRadius="14dp" />
+
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/statusCard"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="@string/mode_camera" />
+                android:layout_marginTop="20dp"
+                android:visibility="gone"
+                app:cardBackgroundColor="@color/pc_surface"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="0dp"
+                app:strokeColor="@color/pc_outline"
+                app:strokeWidth="1dp">
 
-            <RadioButton
-                android:id="@+id/modeMic"
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:gravity="center_horizontal"
+                    android:padding="20dp">
+
+                    <TextView
+                        android:id="@+id/liveLabel"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="● Streaming"
+                        android:textColor="@color/pc_green"
+                        android:textStyle="bold"
+                        android:textSize="15sp" />
+
+                    <ImageView
+                        android:id="@+id/qrImage"
+                        android:layout_width="180dp"
+                        android:layout_height="180dp"
+                        android:layout_marginTop="16dp"
+                        android:background="#FFFFFF"
+                        android:padding="8dp"
+                        android:contentDescription="Stream URL QR code" />
+
+                    <TextView
+                        android:id="@+id/urlText"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="14dp"
+                        android:textColor="@color/pc_text"
+                        android:textIsSelectable="true"
+                        android:fontFamily="monospace"
+                        android:textSize="14sp"
+                        tools:text="rtsp://192.168.0.101:8554/" />
+
+                    <TextView
+                        android:id="@+id/pcStatus"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:text="Waiting for the PC to connect…"
+                        android:textColor="@color/pc_muted"
+                        android:textSize="13sp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/switchCamBtn"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="Switch camera" />
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <TextView
+                android:id="@+id/idleHint"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="@string/mode_mic" />
-        </RadioGroup>
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:text="@string/quality"
-            android:textStyle="bold" />
-
-        <Spinner
-            android:id="@+id/qualitySpinner"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content" />
-
-        <Button
-            android:id="@+id/startBtn"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:text="@string/start" />
-
-        <Button
-            android:id="@+id/stopBtn"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/stop" />
-
-        <Button
-            android:id="@+id/switchCamBtn"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/switch_camera" />
-
-        <TextView
-            android:id="@+id/statusText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:fontFamily="monospace"
-            android:textIsSelectable="true"
-            android:text="○ Idle. Pick a mode and press Start." />
-
-    </LinearLayout>
-</ScrollView>
+                android:layout_marginTop="20dp"
+                android:text="Pick a mode and press Start. Keep the phone on the same Wi-Fi as your PC (or plug in via USB)."
+                android:textColor="@color/pc_muted"
+                android:textSize="13sp"
+                android:lineSpacingExtra="3dp" />
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

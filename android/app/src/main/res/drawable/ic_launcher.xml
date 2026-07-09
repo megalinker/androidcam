@@ -1,0 +1,16 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- rounded background -->
+    <path android:fillColor="#2E5BD8"
+        android:pathData="M0,26 A26,26 0 0,1 26,0 L82,0 A26,26 0 0,1 108,26 L108,82 A26,26 0 0,1 82,108 L26,108 A26,26 0 0,1 0,82 Z"/>
+    <!-- lens (white ring) -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M27,54 a27,27 0 1,0 54,0 a27,27 0 1,0 -54,0"/>
+    <!-- lens inner -->
+    <path android:fillColor="#2E5BD8"
+        android:pathData="M40,54 a14,14 0 1,0 28,0 a14,14 0 1,0 -28,0"/>
+    <!-- highlight -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M61,43 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0"/>
+</vector>

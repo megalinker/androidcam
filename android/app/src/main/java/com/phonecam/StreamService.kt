@@ -65,6 +65,10 @@ class StreamService : Service(), ConnectChecker {
 
         @Volatile var streamUrl: String? = null
             private set
+
+        // True while a PC (RTSP client) is pulling the stream. Drives the "PC connected ✓" UI.
+        @Volatile var clientConnected: Boolean = false
+            private set
     }
 
     private var stream: RtspServerStream? = null
@@ -93,6 +97,7 @@ class StreamService : Service(), ConnectChecker {
 
     private fun startStreaming(mode: Mode, quality: Quality) {
         if (isRunning) return
+        clientConnected = false
 
         // Always use the real camera — even in MIC_ONLY. RootEncoder's RTSP server won't answer any
         // client until the video encoder emits its first keyframe (SPS/PPS via onVideoInfo); a
@@ -162,6 +167,7 @@ class StreamService : Service(), ConnectChecker {
         stream = null
         isRunning = false
         streamUrl = null
+        clientConnected = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
@@ -215,10 +221,10 @@ class StreamService : Service(), ConnectChecker {
 
     // --- ConnectChecker (com.pedro.common). For a server these fire as clients attach/detach. ---
     override fun onConnectionStarted(url: String) { Log.d(TAG, "client connecting: $url") }
-    override fun onConnectionSuccess() { Log.i(TAG, "client connected") }
-    override fun onConnectionFailed(reason: String) { Log.w(TAG, "connection failed: $reason") }
+    override fun onConnectionSuccess() { clientConnected = true; Log.i(TAG, "client connected") }
+    override fun onConnectionFailed(reason: String) { clientConnected = false; Log.w(TAG, "connection failed: $reason") }
     override fun onNewBitrate(bitrate: Long) { /* hook for adaptive bitrate */ }
-    override fun onDisconnect() { Log.i(TAG, "client disconnected") }
+    override fun onDisconnect() { clientConnected = false; Log.i(TAG, "client disconnected") }
     override fun onAuthError() { Log.w(TAG, "auth error") }
     override fun onAuthSuccess() { Log.d(TAG, "auth success") }
 }
