@@ -1,0 +1,104 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 0.1.0 (a v-tag is created)'
+        required: true
+        default: '0.1.0'
+
+permissions:
+  contents: write
+
+jobs:
+  # ---- Android APK ----------------------------------------------------------
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+  # ---- Windows: build receiver + softcam, package installer + zip -----------
+  windows:
+    needs: android
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: apk
+          path: apk
+      - name: Resolve version
+        id: v
+        shell: pwsh
+        run: |
+          if ('${{ github.event_name }}' -eq 'push') { $v = '${{ github.ref_name }}'.TrimStart('v') }
+          else { $v = '${{ github.event.inputs.version }}' }
+          "value=$v" >> $env:GITHUB_OUTPUT
+      - name: Build (FFmpeg + softcam + receiver)
+        shell: pwsh
+        run: windows/packaging/build-windows.ps1 -Toolset v143
+      - name: Assemble payload
+        shell: pwsh
+        run: windows/packaging/assemble.ps1 -ApkPath (Resolve-Path apk/app-debug.apk)
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=${{ steps.v.outputs.value }} windows/packaging/PhoneCam.iss
+      - name: Zip portable build
+        shell: pwsh
+        run: Compress-Archive -Path dist/PhoneCam -DestinationPath "dist/PhoneCam-portable-${{ steps.v.outputs.value }}.zip" -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/PhoneCam-Setup-*.exe
+            dist/PhoneCam-portable-*.zip
+          if-no-files-found: error
+
+  # ---- Publish the GitHub Release ------------------------------------------
+  release:
+    needs: [android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Stage release assets
+        run: |
+          mkdir -p release
+          cp artifacts/windows/* release/
+          cp artifacts/apk/app-debug.apk release/PhoneCam.apk
+          ls -l release
+      - name: Compute tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=v${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: PhoneCam ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: release/*
