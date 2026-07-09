@@ -19,6 +19,8 @@
 
   Receiver passthrough switches: -Preview -Smooth -NoAudio -Udp -FlipH -FlipV -AudioDevice <name-substr>.
   (-FlipH mirrors left/right, -FlipV flips top/bottom; combine for 180 rotation.)
+  -Mic routes the phone audio into a virtual audio cable (default "CABLE Input" / VB-CABLE)
+  so it shows up as a selectable microphone in apps; override with -MicDevice <name-substr>.
   receiver.exe must already be built (windows\build\Release\receiver.exe).
 #>
 param(
@@ -32,6 +34,8 @@ param(
   [switch]$FlipH,
   [switch]$FlipV,
   [string]$AudioDevice,
+  [switch]$Mic,
+  [string]$MicDevice = 'CABLE Input',
   [switch]$NoStart,
   [switch]$DryRun,
   [int]$LocalPort = 18554,
@@ -167,7 +171,10 @@ if ($NoAudio)     { $rArgs += '--no-audio' }
 if ($Udp)         { $rArgs += '--udp' }
 if ($FlipH)       { $rArgs += '--flip-h' }
 if ($FlipV)       { $rArgs += '--flip-v' }
-if ($AudioDevice) { $rArgs += @('--audio-device', $AudioDevice) }
+# Route the phone mic to a virtual audio cable so it becomes a selectable microphone
+# in apps: -AudioDevice wins if given, else -Mic sends audio into $MicDevice (VB-CABLE).
+if     ($AudioDevice) { $rArgs += @('--audio-device', $AudioDevice) }
+elseif ($Mic)         { $rArgs += @('--audio-device', $MicDevice) }
 Write-Host "[phonecam] receiver.exe $($rArgs -join ' ')" -ForegroundColor Cyan
 if ($DryRun) { Write-Host "[phonecam] (dry-run) not launching." -ForegroundColor DarkGray; return }
 

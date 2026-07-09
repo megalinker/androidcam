@@ -59,6 +59,33 @@ Then open Zoom/Teams/Discord/OBS and pick **PhoneCam Camera** as the webcam.
 - `src/wasapi_sink.cpp` — audio is fully wired: it resamples to the endpoint mix format and renders via WASAPI. Against real speakers this already works end to end; the only missing piece for a *microphone* is the Phase-2 loopback driver that makes a render endpoint reappear as a capture device.
 - `src/preview_window.cpp` — GDI preview (`--preview`), so you can validate video before softcam is registered.
 
-## Phase 2 — the virtual microphone
+## Phase 2 — the phone mic as a selectable microphone
 
-See [driver/README.md](driver/README.md). The receiver already *renders* audio via WASAPI, so the driver just needs to be a **loopback** device: a render endpoint ("PhoneCam Audio") whose samples reappear on a capture endpoint ("PhoneCam Microphone"). Fork [`VirtualDrivers/Virtual-Audio-Driver`](https://github.com/VirtualDrivers/Virtual-Audio-Driver) (MIT) or Microsoft's `SysVAD`; then run `receiver.exe --audio-device "PhoneCam Audio"`. Requires the **WDK** and driver **signing** (test-signing for your own PC; EV cert + Microsoft attestation to distribute).
+The receiver already *renders* decoded phone audio to any WASAPI output. To make that
+audio show up as a **microphone** in Zoom/Teams/Discord, feed it into a **virtual audio
+cable** — a render endpoint whose samples reappear on a capture endpoint.
+
+### Recommended: a pre-signed virtual cable (works for everyone, no driver signing)
+
+Install **[VB-CABLE](https://vb-audio.com/Cable/)** (free, Microsoft-signed → installs on any
+Win10/11 with **Secure Boot on, no test-signing**) or use **Voicemeeter**. Then:
+
+```powershell
+.\scripts\phonecam.ps1 -Mic          # routes phone audio into "CABLE Input"
+# or directly:
+.\build\Release\receiver.exe rtsp://<phone-ip>:8554/ --audio-device "CABLE Input"
+```
+
+In your app, pick **CABLE Output (VB-Audio Virtual Cable)** as the microphone. (Verified
+end to end: the phone audio comes out that capture device.) To show it as **"PhoneCam
+Microphone"** instead, right-click it in *Sound settings → Recording → Properties → Rename*
+(one-time, cosmetic).
+
+### Alternative: the custom kernel driver (branded, self-contained — but needs signing)
+
+A from-scratch **PhoneCam Microphone** driver lives in [driver/](driver) (forked from
+Virtual-Audio-Driver, with a real render→capture loopback added). It builds and is
+signable, but a kernel driver only loads either **test-signed** (Secure Boot **off**, your
+PC only) or **Microsoft-attestation-signed** (EV cert, for distribution). See
+[driver/README.md](driver/README.md). For "anyone can install it," the pre-signed cable
+above is the practical choice.
