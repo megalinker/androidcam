@@ -29,6 +29,11 @@ receiver.exe rtsp://<phone-ip>:8554/ [--preview] [--no-audio] [--audio-device <n
   regsvr32 softcam32.dll          (for the 32-bit DLL — needed by 32-bit apps)
   ```
   You only need to register once per machine. Link this receiver against `softcamcore` (see `CMakeLists.txt`).
+  To make the device show up as **PhoneCam Camera** (softcam's default is `DirectShow Softcam`), change
+  `FILTER_NAME` in `third_party/softcam/src/softcam/softcam.cpp` before building the DLL. If you rename it
+  *after* registering, unregister first (`regsvr32 /u`) or delete the stale
+  `HKLM\SOFTWARE\{Classes,WOW6432Node\Classes}\CLSID\{860BB310-5D01-11D0-BD3B-00A0C911CE86}\Instance\<old name>`
+  key — those monikers are keyed by name, so re-registering leaves the old one behind.
 
 ## Build
 
