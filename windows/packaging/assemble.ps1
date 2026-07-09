@@ -28,6 +28,7 @@ $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (Test-Path $csc) {
     & $csc /nologo /target:winexe "/out:$(Join-Path $OutDir 'PhoneCam.exe')" `
         /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
+        /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll `
         (Join-Path $PSScriptRoot 'files\PhoneCam-GUI.cs')
     if ($LASTEXITCODE -ne 0) { throw 'PhoneCam.exe (GUI) compile failed' }
 } else { Write-Warning 'csc.exe not found; PhoneCam.exe GUI not built' }

@@ -25,13 +25,22 @@ public class PhoneCamGui : Form
     const int WS_CAPTION = 0x00C00000, WS_THICKFRAME = 0x00040000, WS_POPUP = unchecked((int)0x80000000);
 
     // --- theme (clean, dark) ---
-    static readonly Color Bg = Color.FromArgb(24, 26, 30);
-    static readonly Color Card = Color.FromArgb(34, 37, 43);
-    static readonly Color Fg = Color.FromArgb(232, 234, 238);
-    static readonly Color Sub = Color.FromArgb(150, 155, 163);
-    static readonly Color Accent = Color.FromArgb(76, 141, 255);
-    static readonly Color Green = Color.FromArgb(64, 190, 120);
-    static readonly Color Amber = Color.FromArgb(230, 175, 70);
+    static readonly Color Bg = Color.FromArgb(27, 29, 33);
+    static readonly Color Card = Color.FromArgb(42, 45, 51);
+    static readonly Color Line = Color.FromArgb(52, 55, 62);
+    static readonly Color Fg = Color.FromArgb(234, 236, 239);
+    static readonly Color Sub = Color.FromArgb(138, 143, 150);
+    static readonly Color Accent = Color.FromArgb(72, 125, 232);
+    static readonly Color Green = Color.FromArgb(72, 190, 128);
+    static readonly Color Amber = Color.FromArgb(226, 170, 74);
+
+    [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int v, int sz);
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        int on = 1;                                   // dark title bar (DWMWA_USE_IMMERSIVE_DARK_MODE)
+        if (DwmSetWindowAttribute(Handle, 20, ref on, 4) != 0) DwmSetWindowAttribute(Handle, 19, ref on, 4);
+    }
 
     RadioButton rbUsb, rbWifi;
     TextBox tbIp;
@@ -74,7 +83,7 @@ public class PhoneCamGui : Form
         Text = "PhoneCam";
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(760, 452);
+        ClientSize = new Size(744, 452);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Bg; ForeColor = Fg;
         Font = new Font("Segoe UI", 9.5f);
@@ -84,15 +93,15 @@ public class PhoneCamGui : Form
         var sub = new Label { Text = "Your phone as a webcam", ForeColor = Sub, Location = new Point(22, 50), AutoSize = true };
         Controls.Add(title); Controls.Add(sub);
 
-        Controls.Add(Section("CONNECT", 84));
+        AddSection("Connect", 84);
         rbUsb = Radio("USB cable", 22, 108, true);
         rbWifi = Radio("Wi-Fi", 22, 134, false);
         tbIp = new TextBox { Location = new Point(96, 132), Width = 150, Enabled = false, BackColor = Card, ForeColor = Fg, BorderStyle = BorderStyle.FixedSingle };
         rbWifi.CheckedChanged += (s, e) => tbIp.Enabled = rbWifi.Checked;
         Controls.Add(rbUsb); Controls.Add(rbWifi); Controls.Add(tbIp);
 
-        Controls.Add(Section("OPTIONS", 172));
-        cbMic = Check("Use phone microphone  (needs VB-CABLE)", 22, 196);
+        AddSection("Options", 172);
+        cbMic = Check("Use phone microphone", 22, 196);
         cbFlipH = Check("Flip left / right", 22, 222);
         cbFlipV = Check("Flip up / down", 22, 248);
         Controls.Add(cbMic); Controls.Add(cbFlipH); Controls.Add(cbFlipV);
@@ -110,15 +119,20 @@ public class PhoneCamGui : Form
         Controls.Add(tip);
 
         // Right: embedded live preview
-        preview = new Panel { Location = new Point(268, 84), Size = new Size(472, 348), BackColor = Color.Black, BorderStyle = BorderStyle.FixedSingle };
-        previewHint = new Label { Text = "Live preview appears here once you press Start.", ForeColor = Sub, BackColor = Color.Black, AutoSize = true, Location = new Point(16, 16) };
+        preview = new Panel { Location = new Point(260, 84), Size = new Size(468, 348), BackColor = Color.FromArgb(12, 13, 15), BorderStyle = BorderStyle.None };
+        preview.Paint += (s, e) => { using (var pen = new Pen(Line)) e.Graphics.DrawRectangle(pen, 0, 0, preview.Width - 1, preview.Height - 1); };
+        previewHint = new Label { Text = "Live preview appears here once you press Start.", ForeColor = Sub, BackColor = Color.FromArgb(12, 13, 15), AutoSize = true, Location = new Point(16, 16) };
         preview.Controls.Add(previewHint);
         Controls.Add(preview);
 
         if (receiverExe == null) { btnStart.Enabled = false; SetStatus(Color.IndianRed, "receiver.exe not found"); }
     }
 
-    Label Section(string t, int y) { return new Label { Text = t, ForeColor = Accent, Font = new Font("Segoe UI Semibold", 8f), Location = new Point(22, y), AutoSize = true }; }
+    void AddSection(string t, int y)
+    {
+        Controls.Add(new Label { Text = t.ToUpperInvariant(), ForeColor = Sub, Font = new Font("Segoe UI", 7.5f, FontStyle.Bold), Location = new Point(24, y), AutoSize = true });
+        Controls.Add(new Panel { BackColor = Line, Location = new Point(24, y + 17), Size = new Size(212, 1) });
+    }
     RadioButton Radio(string t, int x, int y, bool on) { return new RadioButton { Text = t, ForeColor = Fg, Location = new Point(x, y), AutoSize = true, Checked = on, FlatStyle = FlatStyle.Standard }; }
     CheckBox Check(string t, int x, int y) { return new CheckBox { Text = t, ForeColor = Fg, Location = new Point(x, y), AutoSize = true }; }
 
@@ -131,10 +145,50 @@ public class PhoneCamGui : Form
               var p = Process.Start(psi); string o = p.StandardOutput.ReadToEnd(); p.WaitForExit(4000); return o; } catch { return ""; }
     }
 
+    static bool VbCableInstalled()
+    {
+        try { string drv = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "drivers");
+              return Directory.Exists(drv) && Directory.GetFiles(drv, "vbaudio_cable*.sys").Length > 0; } catch { return false; }
+    }
+
+    void InstallVbCable()
+    {
+        try {
+            Cursor = Cursors.WaitCursor;
+            string tmp = Path.Combine(Path.GetTempPath(), "PhoneCam-VBCABLE"); Directory.CreateDirectory(tmp);
+            string zip = Path.Combine(tmp, "vbcable.zip");
+            System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12;
+            using (var wc = new System.Net.WebClient())
+                wc.DownloadFile("https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack43.zip", zip);
+            string ex = Path.Combine(tmp, "pkg"); if (Directory.Exists(ex)) Directory.Delete(ex, true);
+            System.IO.Compression.ZipFile.ExtractToDirectory(zip, ex);
+            Cursor = Cursors.Default;
+            string setup = Path.Combine(ex, "VBCABLE_Setup_x64.exe");
+            if (!File.Exists(setup)) { MessageBox.Show("Downloaded VB-CABLE but couldn't find its installer.", "PhoneCam"); return; }
+            Process.Start(new ProcessStartInfo(setup) { UseShellExecute = true, Verb = "runas" });
+            MessageBox.Show("VB-CABLE (by VB-Audio) is opening. Click “Install Driver”, accept the Windows prompt,\nthen come back and press Start.", "PhoneCam — microphone setup");
+        } catch (Exception e) {
+            Cursor = Cursors.Default;
+            if (MessageBox.Show("Couldn't fetch VB-CABLE automatically:\n" + e.Message + "\n\nOpen the VB-CABLE download page in your browser instead?", "PhoneCam", MessageBoxButtons.YesNo) == DialogResult.Yes)
+                try { Process.Start(new ProcessStartInfo("https://vb-audio.com/Cable/") { UseShellExecute = true }); } catch { }
+        }
+    }
+
     void OnStartStop(object sender, EventArgs e) { if (running) StopReceiver(); else StartReceiver(); }
 
     void StartReceiver()
     {
+        bool useMic = cbMic.Checked;
+        if (useMic && !VbCableInstalled())
+        {
+            var r = MessageBox.Show(
+                "Using the phone as a microphone needs the free VB-CABLE audio driver (by VB-Audio).\n\nDownload and install it now?",
+                "PhoneCam — microphone setup", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+            if (r == DialogResult.Cancel) return;
+            if (r == DialogResult.Yes) { InstallVbCable(); return; }  // install, then press Start again
+            useMic = false;                                          // No -> just the camera
+        }
+
         string url;
         if (rbUsb.Checked)
         {
@@ -154,7 +208,7 @@ public class PhoneCamGui : Form
         var a = new List<string> { url, "--preview" };   // --preview so we can embed the feed
         if (cbFlipH.Checked) a.Add("--flip-h");
         if (cbFlipV.Checked) a.Add("--flip-v");
-        if (cbMic.Checked) { a.Add("--audio-device"); a.Add("CABLE Input"); } else a.Add("--no-audio");
+        if (useMic) { a.Add("--audio-device"); a.Add("CABLE Input"); } else a.Add("--no-audio");
 
         var psi = new ProcessStartInfo(receiverExe, BuildArgs(a)) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
         lock (logLock) logLines.Clear();
