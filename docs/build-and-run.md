@@ -17,7 +17,7 @@ gradle wrapper --gradle-version 8.7      # one-time: creates ./gradlew and the w
 
 Then on the phone: open **PhoneCam**, pick a mode (Camera+Mic / Camera / Mic), grant permissions, press **Start**. The screen shows the pull URL, e.g. `rtsp://192.168.1.42:8554/`. It streams headless (no on-screen preview — view the feed on the PC).
 
-> **URL caveat:** the shown URL comes from RootEncoder's `getEndPointConnection()`, which picks the first interface address — if the phone is on a **VPN** it may show a non-LAN (e.g. IPv6) address the PC can't reach, and the server binds there too. Turn the phone's VPN off, or read the phone's Wi-Fi IPv4 from Settings and use `rtsp://<that-ip>:8554/`.
+> **URL / VPN note:** the app shows the phone's **Wi-Fi (`wlan`) IPv4**, so the URL stays correct even when a VPN/cellular interface is present. But a **full-tunnel VPN** on the phone can still block inbound LAN connections entirely — if the PC can't reach the phone, turn the phone's VPN off, switch it to split-tunnel, or connect over USB.
 >
 > **"Mic only"** still opens the camera (RootEncoder won't serve until the video encoder emits a keyframe) but only audio is sent. If you want the camera truly off, that's a RootEncoder limitation — use it knowing the camera light stays on.
 

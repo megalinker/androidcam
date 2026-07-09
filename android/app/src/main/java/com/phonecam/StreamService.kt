@@ -122,7 +122,9 @@ class StreamService : Service(), ConnectChecker {
 
             s.startStream() // opens the RTSP listening socket; no URL/preview needed
             stream = s
-            streamUrl = s.getStreamClient().getEndPointConnection() // "rtsp://<phone-ip>:8554/"
+            // Prefer the real Wi-Fi IPv4 for the displayed URL (getEndPointConnection can pick a
+            // VPN/cellular address — unreachable, and for IPv6 an unbracketed/malformed URL).
+            streamUrl = wifiRtspUrl() ?: s.getStreamClient().getEndPointConnection()
             isRunning = true
             Log.i(TAG, "RTSP server up ($mode, ${quality.label}) at $streamUrl")
             updateNotification()
@@ -134,6 +136,19 @@ class StreamService : Service(), ConnectChecker {
             isRunning = false
             stopSelf()
         }
+    }
+
+    /** Pull URL from the phone's Wi-Fi (wlan) IPv4, skipping VPN/cellular interfaces. Null if none. */
+    private fun wifiRtspUrl(): String? = try {
+        java.net.NetworkInterface.getNetworkInterfaces().toList()
+            .filter { it.isUp && !it.isLoopback && it.name.startsWith("wlan") }
+            .flatMap { it.inetAddresses.toList() }
+            .filterIsInstance<java.net.Inet4Address>()
+            .firstOrNull { !it.isLoopbackAddress }
+            ?.hostAddress
+            ?.let { "rtsp://$it:$PORT/" }
+    } catch (e: Exception) {
+        Log.w(TAG, "wifiRtspUrl failed", e); null
     }
 
     /** Toggle front/back camera on the running stream (no-op in mic-only mode). */
