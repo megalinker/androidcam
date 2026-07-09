@@ -3,7 +3,8 @@
   Autodetects: phone plugged in over USB -> starts it + tunnels automatically;
   otherwise asks for the address the phone app shows and connects over Wi-Fi.
 #>
-param([switch]$Usb, [switch]$Wifi, [string]$Ip, [switch]$Preview, [switch]$WithAudio, [switch]$FlipH, [switch]$FlipV)
+param([switch]$Usb, [switch]$Wifi, [string]$Ip, [switch]$Preview, [switch]$WithAudio, [switch]$FlipH, [switch]$FlipV,
+      [switch]$Mic, [string]$MicDevice = 'CABLE Input')
 $ErrorActionPreference = 'Stop'
 $here     = $PSScriptRoot
 $receiver = Join-Path $here 'receiver.exe'
@@ -66,7 +67,8 @@ else {
 }
 
 $rArgs = @($url)
-if (-not $WithAudio) { $rArgs += '--no-audio' }
+if     ($Mic)            { $rArgs += @('--audio-device', $MicDevice) }  # phone mic -> virtual cable
+elseif (-not $WithAudio) { $rArgs += '--no-audio' }                    # camera only (default)
 if ($Preview) { $rArgs += '--preview' }
 if ($FlipH)   { $rArgs += '--flip-h' }
 if ($FlipV)   { $rArgs += '--flip-v' }

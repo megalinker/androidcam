@@ -48,6 +48,24 @@ WHAT YOU NEED
   VPN or a "guest"/isolated network.)
 
 ------------------------------------------------------------------------
+ MICROPHONE (optional) - use the phone's mic in apps too
+------------------------------------------------------------------------
+  This is camera by default. To also pipe the phone's microphone into apps:
+  1. Install the free, signed "VB-CABLE" driver: https://vb-audio.com/Cable/
+     (installs on any PC, Secure Boot stays on).
+  2. Start with the -Mic option:   PhoneCam.bat -Mic
+  3. In Zoom/Teams/Discord, pick "CABLE Output (VB-Audio Virtual Cable)" as the
+     microphone.
+  (Optional: to show it as "PhoneCam Microphone", rename it once in
+   Windows Sound settings -> Recording -> CABLE Output -> Properties -> Rename.)
+
+------------------------------------------------------------------------
+ IMAGE FLIP (optional)
+------------------------------------------------------------------------
+  Mirror the picture if it looks reversed:
+     PhoneCam.bat -FlipH        (left/right)   PhoneCam.bat -FlipV   (up/down)
+
+------------------------------------------------------------------------
  NOTES / TROUBLESHOOTING
 ------------------------------------------------------------------------
   - "PhoneCam Camera" shows up in Zoom/Teams/OBS/Discord/Chrome, but NOT
