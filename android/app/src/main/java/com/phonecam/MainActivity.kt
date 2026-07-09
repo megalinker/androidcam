@@ -1,18 +1,19 @@
 package com.phonecam
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.View
 import android.view.WindowManager
-import android.widget.ImageView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -20,13 +21,11 @@ import com.google.android.material.button.MaterialButton
 import com.google.android.material.button.MaterialButtonToggleGroup
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.textfield.MaterialAutoCompleteTextView
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.qrcode.QRCodeWriter
 
 /**
  * Single-screen UI: pick a mode (Cam + Mic / Camera / Mic) and quality, press Start, and the
- * card shows a QR of the pull URL plus a live "PC connected" indicator. The heavy lifting is in
- * [StreamService]; this activity only drives it and polls its state once a second.
+ * card shows the pull address (tap to copy) plus a live "PC connected" indicator. The heavy
+ * lifting is in [StreamService]; this activity only drives it and polls its state once a second.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -37,12 +36,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var idleHint: View
     private lateinit var urlText: TextView
     private lateinit var pcStatus: TextView
-    private lateinit var qrImage: ImageView
 
     private val prefs by lazy { getSharedPreferences("phonecam", MODE_PRIVATE) }
     private val ui = Handler(Looper.getMainLooper())
     private val qualities = StreamService.Quality.values()
-    private var lastQrUrl: String? = null
 
     private val poll = object : Runnable {
         override fun run() { refresh(); ui.postDelayed(this, 1000) }
@@ -60,7 +57,6 @@ class MainActivity : AppCompatActivity() {
         idleHint = findViewById(R.id.idleHint)
         urlText = findViewById(R.id.urlText)
         pcStatus = findViewById(R.id.pcStatus)
-        qrImage = findViewById(R.id.qrImage)
 
         qualityInput.setSimpleItems(qualities.map { it.label }.toTypedArray())
         restoreSelections()
@@ -69,7 +65,15 @@ class MainActivity : AppCompatActivity() {
             if (StreamService.isRunning) stopStreaming()
             else if (ensurePermissions()) startStreaming()
         }
+        urlText.setOnClickListener { copyUrl() }
         findViewById<MaterialButton>(R.id.switchCamBtn).setOnClickListener { switchCamera() }
+    }
+
+    private fun copyUrl() {
+        val url = StreamService.streamUrl ?: return
+        (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+            .setPrimaryClip(ClipData.newPlainText("PhoneCam address", url))
+        Toast.makeText(this, "Address copied", Toast.LENGTH_SHORT).show()
     }
 
     /** Restore the last-used mode + quality from prefs (defaults if none saved). */
@@ -135,14 +139,9 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.qualityLayout).isEnabled = !running
         qualityInput.isEnabled = !running
 
-        if (!running) { lastQrUrl = null; return }
+        if (!running) return
 
-        val url = StreamService.streamUrl ?: ""
-        urlText.text = url
-        if (url.isNotEmpty() && url != lastQrUrl) {
-            qrImage.setImageBitmap(qr(url, 480))
-            lastQrUrl = url
-        }
+        urlText.text = StreamService.streamUrl ?: ""
         val connected = StreamService.clientConnected
         pcStatus.text = if (connected) "✓ PC connected" else "Waiting for the PC to connect…"
         pcStatus.setTextColor(ContextCompat.getColor(this, if (connected) R.color.pc_green else R.color.pc_muted))
@@ -150,18 +149,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() { super.onResume(); ui.post(poll) }
     override fun onPause() { super.onPause(); ui.removeCallbacks(poll) }
-
-    /** Black-on-white QR of [text] at [size]px (setPixels in one shot — no per-pixel jank). */
-    private fun qr(text: String, size: Int): Bitmap {
-        val matrix = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, size, size)
-        val pixels = IntArray(size * size)
-        for (y in 0 until size) {
-            val row = y * size
-            for (x in 0 until size) pixels[row + x] = if (matrix.get(x, y)) Color.BLACK else Color.WHITE
-        }
-        return Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565)
-            .apply { setPixels(pixels, 0, size, 0, 0, size, size) }
-    }
 
     // --- runtime permissions ---
 

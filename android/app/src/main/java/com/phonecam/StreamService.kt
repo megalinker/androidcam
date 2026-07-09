@@ -17,6 +17,8 @@ import com.pedro.encoder.input.sources.audio.NoAudioSource
 import com.pedro.encoder.input.sources.video.Camera2Source
 import com.pedro.encoder.input.sources.video.VideoSource
 import com.pedro.rtspserver.RtspServerStream
+import com.pedro.rtspserver.server.ClientListener
+import com.pedro.rtspserver.server.ServerClient
 
 /**
  * Foreground service that turns the phone into an RTSP *server*. The PC connects to
@@ -113,6 +115,19 @@ class StreamService : Service(), ConnectChecker {
             // Advertise only the relevant track(s) in the SDP for single-medium modes.
             if (mode == Mode.MIC_ONLY) s.getStreamClient().setOnlyAudio(true)
             if (mode == Mode.CAMERA_ONLY) s.getStreamClient().setOnlyVideo(true)
+
+            // Server-side client attach/detach. (The ConnectChecker callbacks below reflect the
+            // phone's own encoder session, NOT a PC pulling — so the "PC connected" state must come
+            // from here, the RTSP server's client listener.)
+            s.getStreamClient().setClientListener(object : ClientListener {
+                override fun onClientConnected(client: ServerClient) {
+                    clientConnected = true; Log.i(TAG, "PC connected (clients=${s.getStreamClient().getNumClients()})")
+                }
+                override fun onClientDisconnected(client: ServerClient) {
+                    clientConnected = false; Log.i(TAG, "PC disconnected")
+                }
+                override fun onClientNewBitrate(bitrate: Long, client: ServerClient) { /* adaptive hook */ }
+            })
 
             // RootEncoder's startStream() starts BOTH encoders regardless of No*Source, so we must
             // prepare BOTH even in single-track modes — otherwise the unused encoder throws
@@ -220,11 +235,11 @@ class StreamService : Service(), ConnectChecker {
     }
 
     // --- ConnectChecker (com.pedro.common). For a server these fire as clients attach/detach. ---
-    override fun onConnectionStarted(url: String) { Log.d(TAG, "client connecting: $url") }
-    override fun onConnectionSuccess() { clientConnected = true; Log.i(TAG, "client connected") }
-    override fun onConnectionFailed(reason: String) { clientConnected = false; Log.w(TAG, "connection failed: $reason") }
+    override fun onConnectionStarted(url: String) { Log.d(TAG, "encoder session starting: $url") }
+    override fun onConnectionSuccess() { Log.i(TAG, "encoder session ready") }
+    override fun onConnectionFailed(reason: String) { Log.w(TAG, "encoder session failed: $reason") }
     override fun onNewBitrate(bitrate: Long) { /* hook for adaptive bitrate */ }
-    override fun onDisconnect() { clientConnected = false; Log.i(TAG, "client disconnected") }
+    override fun onDisconnect() { Log.i(TAG, "encoder session ended") }
     override fun onAuthError() { Log.w(TAG, "auth error") }
     override fun onAuthSuccess() { Log.d(TAG, "auth success") }
 }

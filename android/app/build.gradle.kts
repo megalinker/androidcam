@@ -41,7 +41,6 @@ kotlin {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("com.google.android.material:material:1.12.0")   // Material 3 UI
-    implementation("com.google.zxing:core:3.5.3")                   // QR of the pull URL
 
     // RootEncoder — the phone acts as an RTSP *server* (phone hosts, the PC pulls).
     // RTSP-Server 1.4.1 is the tested pair with RootEncoder core 2.7.2. Both come from JitPack
