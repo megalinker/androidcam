@@ -4,6 +4,7 @@
 #include "endpoints.h"
 #include "minwavert.h"
 #include "minwavertstream.h"
+#include "loopback.h"
 #define MINWAVERTSTREAM_POOLTAG 'SRWM'
 
 #pragma warning (disable : 4127)
@@ -1364,13 +1365,11 @@ VOID CMiniportWaveRTStream::UpdatePosition
             m_bLastBufferRendered = TRUE;
         }
 
-        if (!g_DoNotCreateDataFiles)
-        {
-            // Read from buffer and write to a file.
-            ReadBytes(ByteDisplacement);
-        }
+        // PhoneCam: always process rendered bytes so the loopback FIFO is fed
+        // (the file-save inside ReadBytes stays guarded by g_DoNotCreateDataFiles).
+        ReadBytes(ByteDisplacement);
     }
-    
+
     // Increment the DMA position by the number of bytes displaced since the last
     // call to UpdatePosition() and ensure we properly wrap at buffer length.
     //
@@ -1412,10 +1411,11 @@ ByteDisplacement - # of bytes to process.
     while (ByteDisplacement > 0)
     {
         ULONG runWrite = min(ByteDisplacement, m_ulDmaBufferSize - bufferOffset);
-        
-        // Instead of generating a tone, just output silence
-        RtlZeroMemory(m_pDmaBuffer + bufferOffset, runWrite);
-           	
+
+        // PhoneCam: fill the microphone buffer from the render->capture loopback
+        // FIFO (what the receiver played into "PhoneCam Audio"). Silence on underrun.
+        LoopbackRead(m_pDmaBuffer + bufferOffset, runWrite);
+
         bufferOffset = (bufferOffset + runWrite) % m_ulDmaBufferSize;
         ByteDisplacement -= runWrite;
     }
@@ -1446,7 +1446,16 @@ ByteDisplacement - # of bytes to process.
     while (ByteDisplacement > 0)
     {
         ULONG runWrite = min(ByteDisplacement, m_ulDmaBufferSize - bufferOffset);
-        m_SaveData.WriteData(m_pDmaBuffer + bufferOffset, runWrite);
+
+        // PhoneCam: tap the rendered audio into the loopback FIFO so it surfaces
+        // on "PhoneCam Microphone".
+        LoopbackWrite(m_pDmaBuffer + bufferOffset, runWrite);
+
+        // Original sample behavior: optionally also save render data to a file.
+        if (!g_DoNotCreateDataFiles)
+        {
+            m_SaveData.WriteData(m_pDmaBuffer + bufferOffset, runWrite);
+        }
         bufferOffset = (bufferOffset + runWrite) % m_ulDmaBufferSize;
         ByteDisplacement -= runWrite;
     }

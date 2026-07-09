@@ -22,6 +22,13 @@ windows/third_party/softcam/
 # Packaged distributable (large binaries; build with scripts, don't commit)
 dist/
 
+# Driver build outputs (WDK)
+windows/driver/src/**/x64/
+windows/driver/src/**/Win32/
+windows/driver/src/**/ARM/
+windows/driver/src/**/ARM64/
+windows/driver/src/**/*.user
+
 # Keys / signing
 *.keystore
 *.jks
