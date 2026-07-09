@@ -31,7 +31,11 @@ extern "C" {
 #include "preview_window.h"
 
 #ifdef HAVE_SOFTCAM
-#include "softcam.h"   // scCreateCamera / scSendFrame / scDeleteCamera (tshino/softcam)
+// tshino/softcam exposes the plain-C sc* API only from its DLL; the static softcamcore.lib
+// we link provides the equivalent C++ sender API (softcam::sender::*). Use that so receiver.exe
+// stays self-contained (no runtime dependency on softcam.dll — apps still load the registered
+// filter DLL and share frames via shared memory).
+#include "SenderAPI.h"   // softcam::sender::CreateCamera / SendFrame / DeleteCamera
 #endif
 
 static std::atomic<bool> g_running{true};
@@ -96,7 +100,7 @@ static int video_ensure(VideoConv* v, const AVFrame* f) {
     sws_freeContext(v->sws);
     av_freep(&v->dst_data[0]);
 #ifdef HAVE_SOFTCAM
-    if (v->cam) { scDeleteCamera(v->cam); v->cam = nullptr; }
+    if (v->cam) { softcam::sender::DeleteCamera(v->cam); v->cam = nullptr; }
 #endif
 
     v->w = cw; v->h = ch;
@@ -109,7 +113,7 @@ static int video_ensure(VideoConv* v, const AVFrame* f) {
     if (ret < 0) return ret;
 
 #ifdef HAVE_SOFTCAM
-    v->cam = scCreateCamera(cw, ch, (float)v->fps);
+    v->cam = softcam::sender::CreateCamera(cw, ch, (float)v->fps);
     if (!v->cam)
         fprintf(stderr, "scCreateCamera(%d,%d,%.1f) failed — another softcam instance running?\n",
                 cw, ch, v->fps);
@@ -126,7 +130,7 @@ static int video_process(VideoConv* v, const AVFrame* f) {
               v->dst_data, v->dst_linesize);
 
 #ifdef HAVE_SOFTCAM
-    if (v->cam) scSendFrame(v->cam, v->dst_data[0]);
+    if (v->cam) softcam::sender::SendFrame(v->cam, v->dst_data[0]);
 #endif
     if (v->preview) {
         v->preview->ShowFrame(v->dst_data[0], v->w, v->h);
@@ -279,7 +283,7 @@ static int run_session(const Options& opt, PreviewWindow* preview) {
     sws_freeContext(vconv.sws);
     av_freep(&vconv.dst_data[0]);
 #ifdef HAVE_SOFTCAM
-    if (vconv.cam) scDeleteCamera(vconv.cam);
+    if (vconv.cam) softcam::sender::DeleteCamera(vconv.cam);
 #endif
     avcodec_free_context(&vdec);
     avcodec_free_context(&adec);

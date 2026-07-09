@@ -98,10 +98,24 @@ void PreviewWindow::ShowFrame(const uint8_t* bgr24, int w, int h) {
     int ch = client.bottom - client.top;
     if (cw <= 0 || ch <= 0) return;
 
+    // Preserve the source aspect ratio (letterbox/pillarbox) so the image is never
+    // stretched when the window isn't exactly w:h. (std::min is avoided here because
+    // <windows.h> defines a conflicting min() macro.)
+    double sx = (double)cw / w, sy = (double)ch / h;
+    double scale = (sx < sy) ? sx : sy;
+    int dw = (int)(w * scale + 0.5);
+    int dh = (int)(h * scale + 0.5);
+    int dx = (cw - dw) / 2;
+    int dy = (ch - dh) / 2;
+
     HDC dc = GetDC(s.hwnd);
+    // Paint only the margins black (avoids full-frame flicker on every frame).
+    HBRUSH bg = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    if (dy > 0) { RECT t{0,0,cw,dy}, b{0,ch-dy,cw,ch}; FillRect(dc,&t,bg); FillRect(dc,&b,bg); }
+    if (dx > 0) { RECT l{0,0,dx,ch}, r{cw-dx,0,cw,ch}; FillRect(dc,&l,bg); FillRect(dc,&r,bg); }
     SetStretchBltMode(dc, HALFTONE);
     StretchDIBits(dc,
-                  0, 0, cw, ch,          // dest (scaled to client)
+                  dx, dy, dw, dh,        // dest (aspect-preserved, centered)
                   0, 0, w, h,            // src
                   bgr24, &bi, DIB_RGB_COLORS, SRCCOPY);
     ReleaseDC(s.hwnd, dc);

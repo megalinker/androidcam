@@ -42,15 +42,19 @@ option(WITH_SOFTCAM "Push decoded video into the tshino/softcam virtual camera" 
 if(WITH_SOFTCAM)
     set(SOFTCAM_ROOT "${CMAKE_SOURCE_DIR}/third_party/softcam" CACHE PATH "tshino/softcam checkout")
     set(SOFTCAM_LIB "" CACHE FILEPATH "Path to built softcamcore.lib")
-    if(NOT EXISTS "${SOFTCAM_ROOT}/src/softcam/softcam.h")
-        message(FATAL_ERROR "softcam.h not found under ${SOFTCAM_ROOT}/src/softcam")
+    # The static softcamcore.lib exposes the C++ sender API (softcam::sender::*) in SenderAPI.h.
+    # (The plain-C sc* wrappers live only in softcam.dll; linking the core lib keeps receiver.exe
+    # self-contained.)
+    if(NOT EXISTS "${SOFTCAM_ROOT}/src/softcamcore/SenderAPI.h")
+        message(FATAL_ERROR "SenderAPI.h not found under ${SOFTCAM_ROOT}/src/softcamcore")
     endif()
     if(NOT SOFTCAM_LIB)
         message(FATAL_ERROR "Set -DSOFTCAM_LIB=<path>/softcamcore.lib")
     endif()
     target_compile_definitions(receiver PRIVATE HAVE_SOFTCAM)
-    target_include_directories(receiver PRIVATE "${SOFTCAM_ROOT}/src/softcam")
-    target_link_libraries(receiver PRIVATE "${SOFTCAM_LIB}")
+    target_include_directories(receiver PRIVATE "${SOFTCAM_ROOT}/src/softcamcore")
+    # softcamcore's Timer uses the multimedia timer (timeSetEvent) -> winmm.
+    target_link_libraries(receiver PRIVATE "${SOFTCAM_LIB}" winmm)
 endif()
 
 # Copy the FFmpeg runtime DLLs next to receiver.exe after each build.

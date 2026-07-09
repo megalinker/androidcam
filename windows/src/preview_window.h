@@ -28,7 +28,11 @@ public:
     // True once the user closed the preview window.
     bool closed() const;
 
-private:
+    // Opaque implementation, defined in preview_window.cpp. Declared public (as an
+    // incomplete type) so the window procedure — a free function — can recover it
+    // from GWLP_USERDATA; the pointer itself stays private.
     struct Impl;
+
+private:
     Impl* p_ = nullptr;
 };

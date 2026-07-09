@@ -15,8 +15,9 @@ windows/out/
 windows/*.user
 windows/.vs/
 
-# FFmpeg SDK (download per windows/README.md — do not commit)
+# Third-party deps built/downloaded locally (do not commit) — see windows/README.md
 windows/third_party/ffmpeg/
+windows/third_party/softcam/
 
 # Keys / signing
 *.keystore
