@@ -2,18 +2,12 @@ package com.phonecam
 
 import android.Manifest
 import android.app.Activity
-import android.content.ComponentName
-import android.content.Context
 import android.content.Intent
-import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
-import android.os.IBinder
 import android.os.Looper
-import android.view.SurfaceHolder
-import android.view.SurfaceView
 import android.view.WindowManager
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -31,27 +25,10 @@ class MainActivity : Activity() {
 
     private lateinit var status: TextView
     private lateinit var qualitySpinner: Spinner
-    private lateinit var surfaceView: SurfaceView
     private val prefs by lazy { getSharedPreferences("phonecam", MODE_PRIVATE) }
     private val ui = Handler(Looper.getMainLooper())
     private val poll = object : Runnable {
-        override fun run() { refreshStatus(); tryAttachPreview(); ui.postDelayed(this, 1000) }
-    }
-
-    // Bound connection to the streaming service, so we can attach an on-screen preview.
-    private var service: StreamService? = null
-    private var bound = false
-    private var surfaceAvailable = false
-    private val conn = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            service = (binder as? StreamService.LocalBinder)?.service
-            bound = true
-            tryAttachPreview()
-        }
-        override fun onServiceDisconnected(name: ComponentName?) {
-            service = null
-            bound = false
-        }
+        override fun run() { refreshStatus(); ui.postDelayed(this, 1000) }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -68,34 +45,9 @@ class MainActivity : Activity() {
 
         restoreSelections(qualities)
 
-        surfaceView = findViewById(R.id.surfaceView)
-        surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(holder: SurfaceHolder) { surfaceAvailable = true; tryAttachPreview() }
-            override fun surfaceChanged(holder: SurfaceHolder, format: Int, w: Int, h: Int) {
-                service?.setPreviewResolution(w, h)
-            }
-            override fun surfaceDestroyed(holder: SurfaceHolder) { surfaceAvailable = false; service?.detachPreview() }
-        })
-
         findViewById<Button>(R.id.startBtn).setOnClickListener { if (ensurePermissions()) startStreaming() }
         findViewById<Button>(R.id.stopBtn).setOnClickListener { stopStreaming() }
         findViewById<Button>(R.id.switchCamBtn).setOnClickListener { switchCamera() }
-    }
-
-    /** Attach the preview once the service is bound and the surface exists (service guards the rest). */
-    private fun tryAttachPreview() {
-        if (bound && surfaceAvailable) service?.attachPreview(surfaceView)
-    }
-
-    override fun onStart() {
-        super.onStart()
-        bindService(Intent(this, StreamService::class.java), conn, Context.BIND_AUTO_CREATE)
-    }
-
-    override fun onStop() {
-        super.onStop()
-        service?.detachPreview()
-        if (bound) { unbindService(conn); bound = false }
     }
 
     /** Restore the last-used mode + quality from prefs (defaults if none saved). */

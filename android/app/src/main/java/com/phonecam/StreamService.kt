@@ -6,18 +6,15 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
-import android.view.SurfaceView
 import androidx.core.app.NotificationCompat
 import com.pedro.common.ConnectChecker
 import com.pedro.encoder.input.sources.audio.AudioSource
 import com.pedro.encoder.input.sources.audio.MicrophoneSource
 import com.pedro.encoder.input.sources.audio.NoAudioSource
 import com.pedro.encoder.input.sources.video.Camera2Source
-import com.pedro.encoder.input.sources.video.NoVideoSource
 import com.pedro.encoder.input.sources.video.VideoSource
 import com.pedro.rtspserver.RtspServerStream
 
@@ -71,31 +68,12 @@ class StreamService : Service(), ConnectChecker {
     }
 
     private var stream: RtspServerStream? = null
-    private var hasVideo = false
-    private val binder = LocalBinder()
 
-    /** Lets the Activity reach this service instance to attach an on-screen preview. */
-    inner class LocalBinder : Binder() {
-        val service: StreamService get() = this@StreamService
-    }
-
-    override fun onBind(intent: Intent?): IBinder = binder
-
-    /** Attach the Activity's SurfaceView to the running camera stream. Idempotent; main thread. */
-    fun attachPreview(surfaceView: SurfaceView) {
-        val s = stream ?: return
-        if (!hasVideo || s.isOnPreview) return
-        runCatching { s.startPreview(surfaceView) }.onFailure { Log.w(TAG, "startPreview failed", it) }
-    }
-
-    fun detachPreview() {
-        val s = stream ?: return
-        if (s.isOnPreview) runCatching { s.stopPreview() }.onFailure { Log.w(TAG, "stopPreview failed", it) }
-    }
-
-    fun setPreviewResolution(w: Int, h: Int) {
-        runCatching { stream?.getGlInterface()?.setPreviewResolution(w, h) }
-    }
+    // Headless streaming: no on-screen preview. RootEncoder's startPreview() attaches a second GL
+    // surface to the encoder's shared context and, on at least some devices, releases/re-inits that
+    // context ("SurfaceManager: GL already released") — which blacks out BOTH the preview and the
+    // encoded stream. Capture works reliably without it; view the feed on the PC receiver instead.
+    override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -116,34 +94,46 @@ class StreamService : Service(), ConnectChecker {
     private fun startStreaming(mode: Mode, quality: Quality) {
         if (isRunning) return
 
-        val video: VideoSource = if (mode == Mode.MIC_ONLY) NoVideoSource() else Camera2Source(this)
+        // Always use the real camera — even in MIC_ONLY. RootEncoder's RTSP server won't answer any
+        // client until the video encoder emits its first keyframe (SPS/PPS via onVideoInfo); a
+        // NoVideoSource never produces one, so the server hangs. So we open the camera to unblock the
+        // server, then setOnlyAudio(true) (below) keeps video out of the SDP so the PC only gets audio.
+        val video: VideoSource = Camera2Source(this)
         val audio: AudioSource = if (mode == Mode.CAMERA_ONLY) NoAudioSource() else MicrophoneSource()
 
-        // Phone = RTSP server. Constructor arg order is (context, PORT, connectChecker, video, audio).
-        val s = RtspServerStream(this, PORT, this, video, audio)
+        try {
+            // Phone = RTSP server. Constructor arg order is (context, PORT, connectChecker, video, audio).
+            val s = RtspServerStream(this, PORT, this, video, audio)
 
-        // Advertise only the relevant track(s) in the SDP for single-medium modes.
-        if (mode == Mode.MIC_ONLY) s.getStreamClient().setOnlyAudio(true)
-        if (mode == Mode.CAMERA_ONLY) s.getStreamClient().setOnlyVideo(true)
+            // Advertise only the relevant track(s) in the SDP for single-medium modes.
+            if (mode == Mode.MIC_ONLY) s.getStreamClient().setOnlyAudio(true)
+            if (mode == Mode.CAMERA_ONLY) s.getStreamClient().setOnlyVideo(true)
 
-        val videoOk = mode == Mode.MIC_ONLY ||
-            s.prepareVideo(quality.w, quality.h, quality.bitrate, quality.fps, I_FRAME_INTERVAL, rotation = 0)
-        val audioOk = mode == Mode.CAMERA_ONLY ||
-            s.prepareAudio(AUDIO_SAMPLE_RATE, AUDIO_STEREO, AUDIO_BITRATE)
+            // RootEncoder's startStream() starts BOTH encoders regardless of No*Source, so we must
+            // prepare BOTH even in single-track modes — otherwise the unused encoder throws
+            // "…Encoder not prepared yet" on start. setOnly*/No*Source handle what's actually sent.
+            val videoOk = s.prepareVideo(quality.w, quality.h, quality.bitrate, quality.fps, I_FRAME_INTERVAL, rotation = 0)
+            val audioOk = s.prepareAudio(AUDIO_SAMPLE_RATE, AUDIO_STEREO, AUDIO_BITRATE)
+            if (!videoOk || !audioOk) {
+                Log.e(TAG, "prepare failed (video=$videoOk audio=$audioOk) — try a lower Quality preset")
+                stopSelf()
+                return
+            }
 
-        if (!videoOk || !audioOk) {
-            Log.e(TAG, "prepare failed (video=$videoOk audio=$audioOk) — try a lower Quality preset")
+            s.startStream() // opens the RTSP listening socket; no URL/preview needed
+            stream = s
+            streamUrl = s.getStreamClient().getEndPointConnection() // "rtsp://<phone-ip>:8554/"
+            isRunning = true
+            Log.i(TAG, "RTSP server up ($mode, ${quality.label}) at $streamUrl")
+            updateNotification()
+        } catch (e: Exception) {
+            // Never crash-loop the service (it is START_STICKY): stop cleanly on any start failure.
+            Log.e(TAG, "startStreaming failed", e)
+            runCatching { stream?.stopStream() }
+            stream = null
+            isRunning = false
             stopSelf()
-            return
         }
-
-        s.startStream() // opens the RTSP listening socket; no URL/preview needed
-        stream = s
-        hasVideo = mode != Mode.MIC_ONLY
-        streamUrl = s.getStreamClient().getEndPointConnection() // "rtsp://<phone-ip>:8554/"
-        isRunning = true
-        Log.i(TAG, "RTSP server up ($mode, ${quality.label}) at $streamUrl")
-        updateNotification()
     }
 
     /** Toggle front/back camera on the running stream (no-op in mic-only mode). */
@@ -153,12 +143,8 @@ class StreamService : Service(), ConnectChecker {
     }
 
     private fun stopStreaming() {
-        stream?.let {
-            if (it.isOnPreview) runCatching { it.stopPreview() }
-            if (it.isStreaming) it.stopStream()
-        }
+        stream?.let { if (it.isStreaming) it.stopStream() }
         stream = null
-        hasVideo = false
         isRunning = false
         streamUrl = null
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -180,8 +166,7 @@ class StreamService : Service(), ConnectChecker {
         createChannel()
         val notif = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            var type = 0
-            if (mode != Mode.MIC_ONLY) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA // camera is opened in every mode
             if (mode != Mode.CAMERA_ONLY) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             startForeground(NOTIF_ID, notif, type)
         } else {

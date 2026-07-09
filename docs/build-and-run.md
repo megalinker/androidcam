@@ -15,7 +15,11 @@ gradle wrapper --gradle-version 8.7      # one-time: creates ./gradlew and the w
 ./gradlew installDebug                   # with a phone connected via adb + USB debugging
 ```
 
-Then on the phone: open **PhoneCam**, pick a mode (Camera+Mic / Camera / Mic), grant permissions, press **Start**. The screen shows the pull URL, e.g. `rtsp://192.168.1.42:8554/`, and a **live camera preview** appears above the controls while a camera mode is streaming.
+Then on the phone: open **PhoneCam**, pick a mode (Camera+Mic / Camera / Mic), grant permissions, press **Start**. The screen shows the pull URL, e.g. `rtsp://192.168.1.42:8554/`. It streams headless (no on-screen preview — view the feed on the PC).
+
+> **URL caveat:** the shown URL comes from RootEncoder's `getEndPointConnection()`, which picks the first interface address — if the phone is on a **VPN** it may show a non-LAN (e.g. IPv6) address the PC can't reach, and the server binds there too. Turn the phone's VPN off, or read the phone's Wi-Fi IPv4 from Settings and use `rtsp://<that-ip>:8554/`.
+>
+> **"Mic only"** still opens the camera (RootEncoder won't serve until the video encoder emits a keyframe) but only audio is sent. If you want the camera truly off, that's a RootEncoder limitation — use it knowing the camera light stays on.
 
 > First run tip: if `prepareVideo(1920x1080…)` fails on a weaker phone, lower it to `1280×720` / `4_000_000` bps in [StreamService.kt](../android/app/src/main/java/com/phonecam/StreamService.kt).
 

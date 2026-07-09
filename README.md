@@ -52,9 +52,9 @@ See [docs/architecture.md](docs/architecture.md) for the full design and the res
 
 ## Status
 
-🚧 Pre-first-build (written against verified current APIs, not yet compiled — treat first build on each side as bring-up).
+**Android side built & validated on a real phone** (2026-07-09): builds, installs, and streams — Both (H.264 1080p + AAC), Camera-only (video), and Mic-only (audio) all pull correctly over the LAN. The Windows side is still pre-first-build.
 
-**Android app** — RTSP-server service; **camera / mic / both** toggle; **quality presets** (720p→4K); **front/back** switch; **on-screen preview**; remembers last mode/quality; keeps screen on.
+**Android app** — RTSP-server service (headless, no on-screen preview); **camera / mic / both** toggle; **quality presets** (720p→4K); **front/back** switch; remembers last mode/quality; keeps screen on. Note: "Mic only" still opens the camera (RootEncoder's RTSP server won't answer clients until the video encoder emits a keyframe) but sends **audio only** to the PC.
 **Windows receiver** — RTSP → FFmpeg decode → softcam (video) + WASAPI (audio); **auto-reconnect**; `--preview` GDI window (live fps in the title bar); `--audio-device` / `--no-audio` / `--udp` / `--smooth` flags.
 **Test harness** — `windows/scripts/test-source.*` serves a synthetic RTSP stream so you can validate the receiver with **no phone** and no drivers.
 **Phase 2 (not coded, but tooled)** — the kernel virtual-mic loopback driver; `windows/driver/` has the full runbook + test-sign/install scripts.
