@@ -19,6 +19,7 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <vector>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -59,7 +60,34 @@ struct VideoConv {
     PreviewWindow* preview = nullptr;
     std::chrono::steady_clock::time_point lastStat{};  // preview fps counter
     long        statFrames = 0;
+    bool        flipH = false, flipV = false;   // mirror the output image
+    std::vector<uint8_t> flipRow;               // scratch row for the vertical flip
 };
+
+// In-place mirror of a tightly-packed BGR24 image (w a multiple of 4, stride = dst_linesize).
+static void flip_bgr24(uint8_t* data, int w, int h, int stride, bool fh, bool fv,
+                       std::vector<uint8_t>& tmp) {
+    if (fv) {                                   // swap row y with row (h-1-y)
+        if ((int)tmp.size() < stride) tmp.resize(stride);
+        for (int y = 0; y < h / 2; ++y) {
+            uint8_t* a = data + (size_t)y * stride;
+            uint8_t* b = data + (size_t)(h - 1 - y) * stride;
+            memcpy(tmp.data(), a, stride);
+            memcpy(a, b, stride);
+            memcpy(b, tmp.data(), stride);
+        }
+    }
+    if (fh) {                                   // reverse the pixels within each row
+        for (int y = 0; y < h; ++y) {
+            uint8_t* row = data + (size_t)y * stride;
+            for (int x = 0; x < w / 2; ++x) {
+                uint8_t* p = row + (size_t)x * 3;
+                uint8_t* q = row + (size_t)(w - 1 - x) * 3;
+                for (int c = 0; c < 3; ++c) { uint8_t t = p[c]; p[c] = q[c]; q[c] = t; }
+            }
+        }
+    }
+}
 
 static int open_decoder(AVFormatContext* fmt, AVMediaType type,
                         int* stream_idx, AVCodecContext** dec_ctx, bool lowLatency) {
@@ -129,6 +157,9 @@ static int video_process(VideoConv* v, const AVFrame* f) {
     sws_scale(v->sws, (const uint8_t* const*)f->data, f->linesize, 0, f->height,
               v->dst_data, v->dst_linesize);
 
+    if (v->flipH || v->flipV)
+        flip_bgr24(v->dst_data[0], v->w, v->h, v->dst_linesize[0], v->flipH, v->flipV, v->flipRow);
+
 #ifdef HAVE_SOFTCAM
     if (v->cam) softcam::sender::SendFrame(v->cam, v->dst_data[0]);
 #endif
@@ -185,6 +216,7 @@ struct Options {
     bool noAudio = false;
     bool udp = false;
     bool smooth = false;   // trade latency for jitter resistance
+    bool flipH = false, flipV = false;   // mirror the webcam image
     std::string audioDevice;
 };
 
@@ -196,6 +228,8 @@ static Options parse_args(int argc, char** argv) {
         else if (a == "--no-audio") o.noAudio = true;
         else if (a == "--udp") o.udp = true;
         else if (a == "--smooth") o.smooth = true;
+        else if (a == "--flip-h" || a == "--mirror") o.flipH = true;
+        else if (a == "--flip-v") o.flipV = true;
         else if (a == "--audio-device" && i + 1 < argc) o.audioDevice = argv[++i];
         else if (a.rfind("--", 0) == 0) fprintf(stderr, "ignoring unknown option: %s\n", a.c_str());
         else o.url = argv[i];
@@ -256,6 +290,8 @@ static int run_session(const Options& opt, PreviewWindow* preview) {
         double fps = av_q2d(fmt->streams[vstream]->avg_frame_rate);
         vconv.fps = (fps > 0.0) ? fps : 30.0;
         vconv.preview = preview;
+        vconv.flipH = opt.flipH;
+        vconv.flipV = opt.flipV;
     }
 
     int rc = -1; // assume disconnect unless we detect a clean stop
@@ -296,7 +332,7 @@ int main(int argc, char** argv) {
     if (!opt.url) {
         fprintf(stderr,
             "usage: %s rtsp://<phone-ip>:8554/ [--preview] [--no-audio] "
-            "[--audio-device <name-substr>] [--udp] [--smooth]\n", argv[0]);
+            "[--audio-device <name-substr>] [--udp] [--smooth] [--flip-h] [--flip-v]\n", argv[0]);
         return 1;
     }
     signal(SIGINT, on_sigint);

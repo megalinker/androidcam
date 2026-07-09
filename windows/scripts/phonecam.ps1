@@ -17,7 +17,8 @@
     .\phonecam.ps1 -DryRun              # show the decision + exact command, run nothing
     .\phonecam.ps1 -Smooth -AudioDevice Realtek   # receiver flags: jitter buffer + target output
 
-  Receiver passthrough switches: -Preview -Smooth -NoAudio -Udp -AudioDevice <name-substr>.
+  Receiver passthrough switches: -Preview -Smooth -NoAudio -Udp -FlipH -FlipV -AudioDevice <name-substr>.
+  (-FlipH mirrors left/right, -FlipV flips top/bottom; combine for 180 rotation.)
   receiver.exe must already be built (windows\build\Release\receiver.exe).
 #>
 param(
@@ -28,6 +29,8 @@ param(
   [switch]$Smooth,
   [switch]$NoAudio,
   [switch]$Udp,
+  [switch]$FlipH,
+  [switch]$FlipV,
   [string]$AudioDevice,
   [switch]$NoStart,
   [switch]$DryRun,
@@ -162,6 +165,8 @@ if ($Preview)     { $rArgs += '--preview' }
 if ($Smooth)      { $rArgs += '--smooth' }
 if ($NoAudio)     { $rArgs += '--no-audio' }
 if ($Udp)         { $rArgs += '--udp' }
+if ($FlipH)       { $rArgs += '--flip-h' }
+if ($FlipV)       { $rArgs += '--flip-v' }
 if ($AudioDevice) { $rArgs += @('--audio-device', $AudioDevice) }
 Write-Host "[phonecam] receiver.exe $($rArgs -join ' ')" -ForegroundColor Cyan
 if ($DryRun) { Write-Host "[phonecam] (dry-run) not launching." -ForegroundColor DarkGray; return }

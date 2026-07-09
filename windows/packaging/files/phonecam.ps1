@@ -3,7 +3,7 @@
   Autodetects: phone plugged in over USB -> starts it + tunnels automatically;
   otherwise asks for the address the phone app shows and connects over Wi-Fi.
 #>
-param([switch]$Usb, [switch]$Wifi, [string]$Ip, [switch]$Preview, [switch]$WithAudio)
+param([switch]$Usb, [switch]$Wifi, [string]$Ip, [switch]$Preview, [switch]$WithAudio, [switch]$FlipH, [switch]$FlipV)
 $ErrorActionPreference = 'Stop'
 $here     = $PSScriptRoot
 $receiver = Join-Path $here 'receiver.exe'
@@ -68,6 +68,8 @@ else {
 $rArgs = @($url)
 if (-not $WithAudio) { $rArgs += '--no-audio' }
 if ($Preview) { $rArgs += '--preview' }
+if ($FlipH)   { $rArgs += '--flip-h' }
+if ($FlipV)   { $rArgs += '--flip-v' }
 
 Write-Host ""
 Write-Host "  Connecting to $url ..." -ForegroundColor Green

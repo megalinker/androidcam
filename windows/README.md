@@ -7,13 +7,14 @@ Pulls the phone's RTSP stream, decodes it with FFmpeg, and pushes:
 ## Options
 
 ```
-receiver.exe rtsp://<phone-ip>:8554/ [--preview] [--no-audio] [--audio-device <name-substr>] [--udp]
+receiver.exe rtsp://<phone-ip>:8554/ [--preview] [--no-audio] [--audio-device <name-substr>] [--udp] [--flip-h] [--flip-v]
 ```
 
 - `--preview` — show the decoded video in a GDI window (verify the pipeline without softcam).
 - `--no-audio` — video only.
 - `--audio-device <substr>` — render audio to the endpoint whose name contains `<substr>` (e.g. `PhoneCam`); default is the system default output.
 - `--udp` — use RTSP-over-UDP (lower latency, tolerates loss) instead of TCP.
+- `--flip-h` / `--flip-v` — mirror the image left/right or top/bottom (combine for a 180° rotation). Applies to both the softcam camera and the `--preview` window.
 - `--smooth` — add a jitter buffer (reorder queue + demux delay + threaded decode). Smoother on a congested/weak Wi-Fi link at the cost of latency. Default is lowest-latency.
 
 > **Build this on Windows.** MSVC + Windows SDK are required to compile, register (`regsvr32`), and debug a DirectShow filter. It cannot be built or tested from Linux. A Windows 10/11 VM (KVM/QEMU/VirtualBox) is fine.
