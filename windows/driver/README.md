@@ -22,41 +22,68 @@ The receiver **already** renders the decoded phone audio to a WASAPI endpoint (`
 
 The driver's internal ring buffer should run at **48 kHz** to match both the phone stream and the app's WASAPI shared-mode format, minimizing resample drift.
 
-## Runbook (personal use, test-signed)
+## The driver is built here
 
-Do all of this on Windows (a Win10/11 VM is fine). Steps 1–2 map to the scripts in [`scripts/`](scripts).
+The fork lives in [`src/`](src) (Virtual-Audio-Driver, MIT), **already rebranded**
+to **PhoneCam Audio** (render) / **PhoneCam Microphone** (capture) and with a real
+**render→capture loopback** implemented in [`src/Source/Main/loopback.h`](src/Source/Main/loopback.h) /
+[`loopback.cpp`](src/Source/Main/loopback.cpp) (the base driver's mic was a
+tone/silence generator). Both endpoints default to **48 kHz / 16-bit / 2ch** so the
+loopback is a correct byte copy in shared mode.
 
-1. **Install tools:** Visual Studio 2022 + **WDK** (matching Windows SDK). This gives `msbuild`, `signtool`, `inf2cat`, `pnputil`.
+### Build
 
-2. **Fork & rename:** clone your chosen base into `windows/driver/src/`. In its `.inf` and resource strings, rename the endpoints to:
-   - render/playback → **PhoneCam Audio**
-   - capture/mic → **PhoneCam Microphone**
-   Keep (or add) the internal **loopback** so render samples appear on the capture pin. Set the format list to include **48000 Hz, 16-bit, 1–2 ch**.
+Needs **Visual Studio 2019 or 2022 + the WDK matching your Windows SDK** (here:
+WDK 10.0.19041). One-time: install the WDK, then install its VS extension
+`C:\Program Files (x86)\Windows Kits\10\Vsix\VS2019\WDK.vsix` into your VS instance
+(`VSIXInstaller.exe /quiet /admin WDK.vsix`) so the `WindowsKernelModeDriver10.0`
+toolset is available. Then:
 
-3. **Enable test-signing** (needed once per machine), then reboot:
+```powershell
+$msb = "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\MSBuild\Current\Bin\MSBuild.exe"
+& $msb windows\driver\src\VirtualAudioDriver.sln /t:Rebuild `
+    /p:Configuration=Release /p:Platform=x64 /p:SpectreMitigation=false
+```
+
+`SpectreMitigation=false` avoids needing the Spectre-mitigated CRT libs; install
+those (VS Installer → individual components) and drop the flag for a hardened build.
+Output: `windows\driver\src\x64\Release\package\VirtualAudioDriver.{sys,inf,cat}`.
+
+## Install on your PC (test-signed — needs Secure Boot OFF)
+
+> A self-test-signed kernel driver only loads when **test-signing mode** is on, and
+> that mode **does not take effect while Secure Boot is enabled**. Turn Secure Boot
+> **off in your UEFI/BIOS first**. (Bring-up carries some BSOD risk — a restore point
+> is wise.)
+
+1. **Enable test-signing**, then reboot:
    ```powershell
    .\scripts\1-enable-testsigning.ps1   # elevated; then REBOOT
    ```
-
-4. **Create + trust a self-signed cert:**
+2. **Create + trust a test cert:**
    ```powershell
    .\scripts\2-make-testcert.ps1        # elevated; makes phonecam-test.pfx
    ```
-
-5. **Build** the driver (from the fork's solution / `.vcxproj`), producing `phonecam-audio.sys` + `phonecam-audio.inf`.
-
-6. **Catalog, sign, install:**
+3. **Sign + install the built package:**
    ```powershell
-   .\scripts\3-sign-and-install.ps1 -SysPath <build>\phonecam-audio.sys -InfPath <build>\phonecam-audio.inf
+   .\scripts\3-sign-and-install.ps1 `
+     -SysPath ..\src\x64\Release\package\VirtualAudioDriver.sys `
+     -InfPath ..\src\x64\Release\package\VirtualAudioDriver.inf
    ```
-
-7. **Verify:** Settings → System → Sound should list **PhoneCam Microphone** (input) and **PhoneCam Audio** (output). Then:
+4. **Verify:** Settings → System → Sound should list **PhoneCam Microphone** (input)
+   and **PhoneCam Audio** (output). Then run the receiver into the render endpoint and
+   pick the mic in your app:
    ```powershell
-   receiver.exe rtsp://<phone-ip>:8554/ --audio-device "PhoneCam Audio"
+   .\build\Release\receiver.exe rtsp://<phone-ip>:8554/ --audio-device "PhoneCam Audio"
    ```
-   Pick **PhoneCam Microphone** in Zoom/Teams/Discord.
+   Pick **PhoneCam Microphone** in Zoom/Teams/Discord. Talk near the phone — you should
+   hear it come through as mic input.
 
 Remove it later with `.\scripts\4-uninstall.ps1`.
+
+> **Production path (no Secure-Boot-off):** to load without test-signing, the driver
+> must be **Microsoft-attestation-signed** via the Partner Center (needs an EV cert).
+> That's the real "no bandaids" distribution route; test-signing is the personal-PC route.
 
 ## Requirements & gotchas
 
@@ -67,4 +94,11 @@ Remove it later with `.\scripts\4-uninstall.ps1`.
 
 ## Status
 
-**Not started.** Phase 1 (camera) + the WASAPI render path ship first. This folder holds the plan and the sign/install tooling; the driver `.sys`/`.inf` come from your fork.
+**Built + rebranded + loopback implemented.** The driver compiles (VS2019 + WDK
+10.0.19041) and passes the WDK signability test, producing a test-signed
+`VirtualAudioDriver.{sys,inf,cat}`. **Not yet validated on hardware** — loading a
+kernel driver needs the Secure-Boot-off + test-sign + reboot cycle above, which
+couldn't be exercised in the build environment. The loopback design is a
+48 kHz/16-bit/2ch spin-lock-guarded ring FIFO (`loopback.cpp`); the first on-device
+test should confirm audio actually flows speaker→mic and watch for clock drift
+between the network source and the device clock.
