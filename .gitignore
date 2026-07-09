@@ -19,6 +19,9 @@ windows/.vs/
 windows/third_party/ffmpeg/
 windows/third_party/softcam/
 
+# Packaged distributable (large binaries; build with scripts, don't commit)
+dist/
+
 # Keys / signing
 *.keystore
 *.jks
