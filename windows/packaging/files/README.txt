@@ -28,16 +28,17 @@ WHAT YOU NEED
 ------------------------------------------------------------------------
  ON THE PC
 ------------------------------------------------------------------------
-  1. Double-click  1-Install-Camera.bat   (say YES to the admin prompt).
-     Do this ONCE per PC. It adds the "PhoneCam Camera" webcam.
-  2. Double-click  PhoneCam.bat
-     - It asks for the address shown on the phone. Type it (or just the
-       numbers, e.g. 192.168.0.101) and press Enter.
+  1. Add the camera to Windows (once per PC):
+       - Installer (Setup.exe): already done - skip this step.
+       - Portable (zip): double-click  1-Install-Camera.bat  (say YES to admin).
+  2. Open  PhoneCam  (the app / Start-menu shortcut, or PhoneCam.exe in the zip).
+     In the window: pick "USB cable" or "Wi-Fi" (type the address the phone
+     shows), then click Start.
   3. Open Zoom / Teams / Meet / Discord / OBS and pick the camera named
-       "PhoneCam Camera".
-     That's it - your phone is now the webcam.
+       "PhoneCam Camera".  That's it - your phone is now the webcam.
 
-  Keep the PhoneCam.bat window open while you use it. Close it to stop.
+  Close the PhoneCam window to stop. (Prefer the command line? PhoneCam.bat
+  and bin\phonecam.ps1 take the same options.)
 
 ------------------------------------------------------------------------
  USB instead of Wi-Fi (optional, more reliable, no typing an address)

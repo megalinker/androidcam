@@ -23,6 +23,15 @@ Copy-Item (Join-Path $PSScriptRoot 'files\phonecam.ps1') (Join-Path $OutDir 'bin
 Copy-Item (Join-Path $PSScriptRoot 'files\PhoneCam.bat') $OutDir -Force
 Copy-Item (Join-Path $PSScriptRoot 'files\README.txt')   $OutDir -Force
 
+# Compile the windowed launcher PhoneCam.exe with the built-in .NET Framework csc.
+$csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+if (Test-Path $csc) {
+    & $csc /nologo /target:winexe "/out:$(Join-Path $OutDir 'PhoneCam.exe')" `
+        /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
+        (Join-Path $PSScriptRoot 'files\PhoneCam-GUI.cs')
+    if ($LASTEXITCODE -ne 0) { throw 'PhoneCam.exe (GUI) compile failed' }
+} else { Write-Warning 'csc.exe not found; PhoneCam.exe GUI not built' }
+
 if ($ApkPath) { Copy-Item $ApkPath (Join-Path $OutDir 'PhoneCam.apk') -Force }
 elseif (-not (Test-Path (Join-Path $OutDir 'PhoneCam.apk'))) { Write-Warning 'No APK present (pass -ApkPath); the installer build needs PhoneCam.apk.' }
 

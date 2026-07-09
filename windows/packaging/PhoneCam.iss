@@ -29,6 +29,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
 
 [Files]
+Source: "{#Payload}\PhoneCam.exe"; DestDir: "{app}"
 Source: "{#Payload}\PhoneCam.bat"; DestDir: "{app}"
 Source: "{#Payload}\README.txt";   DestDir: "{app}"; Flags: isreadme
 Source: "{#Payload}\PhoneCam.apk";  DestDir: "{app}"
@@ -36,11 +37,12 @@ Source: "{#Payload}\bin\*";         DestDir: "{app}\bin"; Flags: recursesubdirs
 Source: "{#Payload}\redist\*";      DestDir: "{tmp}\redist"; Flags: deleteafterinstall
 
 [Icons]
-Name: "{group}\Start PhoneCam webcam";        Filename: "{app}\PhoneCam.bat"; WorkingDir: "{app}"; IconFilename: "{app}\bin\receiver.exe"
+Name: "{group}\PhoneCam";                     Filename: "{app}\PhoneCam.exe"; WorkingDir: "{app}"
+Name: "{group}\PhoneCam (command line)";      Filename: "{app}\PhoneCam.bat"; WorkingDir: "{app}"; IconFilename: "{app}\bin\receiver.exe"
 Name: "{group}\Install Android app (APK)";    Filename: "{app}\PhoneCam.apk"
 Name: "{group}\README";                       Filename: "{app}\README.txt"
 Name: "{group}\Uninstall PhoneCam";           Filename: "{uninstallexe}"
-Name: "{autodesktop}\PhoneCam webcam";        Filename: "{app}\PhoneCam.bat"; WorkingDir: "{app}"; IconFilename: "{app}\bin\receiver.exe"; Tasks: desktopicon
+Name: "{autodesktop}\PhoneCam";               Filename: "{app}\PhoneCam.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Tasks]
 Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
@@ -53,7 +55,7 @@ Filename: "{tmp}\redist\vc_redist.x86.exe"; Parameters: "/install /quiet /norest
 Filename: "{sys}\regsvr32.exe";      Parameters: "/s ""{app}\bin\softcam\x64\softcam.dll""";   StatusMsg: "Adding PhoneCam Camera (64-bit)..."; Flags: waituntilterminated
 Filename: "{syswow64}\regsvr32.exe"; Parameters: "/s ""{app}\bin\softcam\Win32\softcam.dll"""; StatusMsg: "Adding PhoneCam Camera (32-bit)..."; Flags: waituntilterminated
 ; Offer to launch.
-Filename: "{app}\PhoneCam.bat"; Description: "Start PhoneCam now"; Flags: postinstall nowait skipifsilent unchecked
+Filename: "{app}\PhoneCam.exe"; Description: "Start PhoneCam now"; Flags: postinstall nowait skipifsilent unchecked
 
 [UninstallRun]
 Filename: "{sys}\regsvr32.exe";      Parameters: "/s /u ""{app}\bin\softcam\x64\softcam.dll""";   RunOnceId: "unreg64"; Flags: waituntilterminated
