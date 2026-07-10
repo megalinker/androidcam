@@ -29,11 +29,14 @@ ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
 
 [Files]
-Source: "{#Payload}\PhoneCam.exe"; DestDir: "{app}"
-Source: "{#Payload}\PhoneCam.bat"; DestDir: "{app}"
-Source: "{#Payload}\README.txt";   DestDir: "{app}"; Flags: isreadme
-Source: "{#Payload}\PhoneCam.apk";  DestDir: "{app}"
-Source: "{#Payload}\bin\*";         DestDir: "{app}\bin"; Flags: recursesubdirs
+; ignoreversion is essential: PhoneCam.exe (csc, no version resource) and receiver.exe otherwise
+; look like the same "version 0.0.0.0" every build, so Inno's default rule skips overwriting them
+; and every "update" silently keeps the old exe. ignoreversion = always replace our files.
+Source: "{#Payload}\PhoneCam.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Payload}\PhoneCam.bat"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Payload}\README.txt";   DestDir: "{app}"; Flags: isreadme ignoreversion
+Source: "{#Payload}\PhoneCam.apk";  DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Payload}\bin\*";         DestDir: "{app}\bin"; Flags: recursesubdirs ignoreversion
 Source: "{#Payload}\redist\*";      DestDir: "{tmp}\redist"; Flags: deleteafterinstall
 
 [Icons]
