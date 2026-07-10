@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.View
 import android.view.WindowManager
 import android.widget.TextView
@@ -21,6 +22,8 @@ import com.google.android.material.button.MaterialButton
 import com.google.android.material.button.MaterialButtonToggleGroup
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.textfield.MaterialAutoCompleteTextView
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 
 /**
  * Single-screen UI: pick a mode (Cam + Mic / Camera / Mic) and quality, press Start, and the
@@ -40,6 +43,12 @@ class MainActivity : AppCompatActivity() {
     private val prefs by lazy { getSharedPreferences("phonecam", MODE_PRIVATE) }
     private val ui = Handler(Looper.getMainLooper())
     private val qualities = StreamService.Quality.values()
+
+    // Wi-Fi pairing: the PC target from the last scanned QR, held across the permission prompt.
+    private var pendingTarget: PcTarget? = null
+    private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
+        result.contents?.let { onScanned(it) }
+    }
 
     private val poll = object : Runnable {
         override fun run() { refresh(); ui.postDelayed(this, 1000) }
@@ -65,8 +74,64 @@ class MainActivity : AppCompatActivity() {
             if (StreamService.isRunning) stopStreaming()
             else if (ensurePermissions()) startStreaming()
         }
+        findViewById<MaterialButton>(R.id.scanBtn).setOnClickListener { launchScan() }
         urlText.setOnClickListener { copyUrl() }
         findViewById<MaterialButton>(R.id.switchCamBtn).setOnClickListener { switchCamera() }
+    }
+
+    // --- Wi-Fi pairing (scan the PC's QR) ---
+
+    private fun launchScan() {
+        scanLauncher.launch(
+            ScanOptions()
+                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                .setPrompt("Scan the QR shown in the PhoneCam app on your PC")
+                .setBeepEnabled(false)
+                .setOrientationLocked(false)
+        )
+    }
+
+    private fun onScanned(payload: String) {
+        val target = PcTarget.parse(payload)
+        if (target == null) {
+            Toast.makeText(this, "That isn't a PhoneCam PC code.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        pendingTarget = target
+        if (ensurePermissions()) beginPairing()   // else resumed from onRequestPermissionsResult
+    }
+
+    /** Start streaming (if needed), then announce our pull URL to the scanned PC on a worker thread. */
+    private fun beginPairing() {
+        val target = pendingTarget ?: return
+        pendingTarget = null
+        if (!StreamService.isRunning) startStreaming()
+        Toast.makeText(this, "Pairing with the PC…", Toast.LENGTH_SHORT).show()
+        val mode = selectedMode().name
+        Thread {
+            val url = waitForStreamUrl(6000)
+            if (url == null) {
+                ui.post { Toast.makeText(this, "Couldn't start the stream.", Toast.LENGTH_SHORT).show() }
+                return@Thread
+            }
+            val ok = PcLink.announce(target, url, mode)
+            ui.post {
+                Toast.makeText(
+                    this,
+                    if (ok) "Sent to PC — it should connect now." else "Couldn't reach the PC. Same Wi‑Fi?",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }.start()
+    }
+
+    private fun waitForStreamUrl(timeoutMs: Long): String? {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < deadline) {
+            StreamService.streamUrl?.let { return it }
+            Thread.sleep(150)
+        }
+        return null
     }
 
     private fun copyUrl() {
@@ -131,6 +196,7 @@ class MainActivity : AppCompatActivity() {
     private fun refresh() {
         val running = StreamService.isRunning
         startBtn.text = if (running) "Stop streaming" else "Start streaming"
+        findViewById<View>(R.id.scanBtn).visibility = if (running) View.GONE else View.VISIBLE
         statusCard.visibility = if (running) View.VISIBLE else View.GONE
         idleHint.visibility = if (running) View.GONE else View.VISIBLE
 
@@ -177,8 +243,12 @@ class MainActivity : AppCompatActivity() {
         // CAMERA + RECORD_AUDIO are the hard requirements; POST_NOTIFICATIONS is best-effort.
         val camOk = isGranted(permissions, grantResults, Manifest.permission.CAMERA)
         val micOk = isGranted(permissions, grantResults, Manifest.permission.RECORD_AUDIO)
-        if (camOk && micOk) startStreaming()
-        else pcStatus.text = "Camera and microphone permissions are required."
+        if (camOk && micOk) {
+            if (pendingTarget != null) beginPairing() else startStreaming()
+        } else {
+            pendingTarget = null
+            pcStatus.text = "Camera and microphone permissions are required."
+        }
     }
 
     private fun isGranted(perms: Array<out String>, results: IntArray, name: String): Boolean {

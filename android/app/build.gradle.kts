@@ -41,6 +41,7 @@ kotlin {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("com.google.android.material:material:1.12.0")   // Material 3 UI
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")  // scan the PC's pairing QR
 
     // RootEncoder — the phone acts as an RTSP *server* (phone hosts, the PC pulls).
     // RTSP-Server 1.4.1 is the tested pair with RootEncoder core 2.7.2. Both come from JitPack
