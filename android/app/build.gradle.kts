@@ -1,3 +1,5 @@
+import java.io.File
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -19,11 +21,11 @@ android {
     // so every build shares one signature and users can update in place. Without the secret
     // (local builds / forks) we fall back to debug signing so the build still works.
     val ksPath = System.getenv("PHONECAM_KEYSTORE")
-    val hasReleaseKey = ksPath != null && java.io.File(ksPath).let { it.exists() && it.length() > 0 }
+    val hasReleaseKey = ksPath != null && File(ksPath).let { it.exists() && it.length() > 0 }
     signingConfigs {
         if (hasReleaseKey) {
             create("release") {
-                storeFile = java.io.File(ksPath!!)
+                storeFile = File(ksPath!!)
                 storePassword = System.getenv("PHONECAM_KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("PHONECAM_KEY_ALIAS") ?: "phonecam"
                 keyPassword = System.getenv("PHONECAM_KEY_PASSWORD") ?: System.getenv("PHONECAM_KEYSTORE_PASSWORD")
