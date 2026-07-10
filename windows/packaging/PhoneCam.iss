@@ -62,6 +62,18 @@ Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""P
 ; Offer to launch.
 Filename: "{app}\PhoneCam.exe"; Description: "Start PhoneCam now"; Flags: postinstall nowait skipifsilent unchecked
 
+[Code]
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var rc: Integer;
+begin
+  // Force-close a running PhoneCam so its .exe/.dll aren't locked. Without this, installing over a
+  // running instance silently keeps the OLD exe (the file can't be overwritten), so the "update"
+  // does nothing — which is exactly what a tester hit (no version / no diagnostics = stale build).
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/f /im PhoneCam.exe', '', SW_HIDE, ewWaitUntilTerminated, rc);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/f /im receiver.exe', '', SW_HIDE, ewWaitUntilTerminated, rc);
+  Result := '';
+end;
+
 [UninstallRun]
 Filename: "{sys}\regsvr32.exe";      Parameters: "/s /u ""{app}\bin\softcam\x64\softcam.dll""";   RunOnceId: "unreg64"; Flags: waituntilterminated
 Filename: "{syswow64}\regsvr32.exe"; Parameters: "/s /u ""{app}\bin\softcam\Win32\softcam.dll"""; RunOnceId: "unreg86"; Flags: waituntilterminated
