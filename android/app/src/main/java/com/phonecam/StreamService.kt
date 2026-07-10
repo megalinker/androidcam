@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.pedro.common.ConnectChecker
@@ -74,6 +75,7 @@ class StreamService : Service(), ConnectChecker {
     }
 
     private var stream: RtspServerStream? = null
+    private var wakeLock: PowerManager.WakeLock? = null
 
     // Headless streaming: no on-screen preview. RootEncoder's startPreview() attaches a second GL
     // surface to the encoder's shared context and, on at least some devices, releases/re-inits that
@@ -129,10 +131,16 @@ class StreamService : Service(), ConnectChecker {
                 override fun onClientNewBitrate(bitrate: Long, client: ServerClient) { /* adaptive hook */ }
             })
 
+            // Follow the phone's orientation so the picture isn't squished: with rotation = 0 the
+            // encoder always emitted a landscape 1920x1080 frame, so holding the phone portrait
+            // crushed the tall scene into a wide frame. getCameraOrientation() rotates the frame to
+            // match the device (portrait -> portrait output), which keeps the aspect correct.
+            val rotation = com.pedro.encoder.input.video.CameraHelper.getCameraOrientation(this)
+
             // RootEncoder's startStream() starts BOTH encoders regardless of No*Source, so we must
             // prepare BOTH even in single-track modes — otherwise the unused encoder throws
             // "…Encoder not prepared yet" on start. setOnly*/No*Source handle what's actually sent.
-            val videoOk = s.prepareVideo(quality.w, quality.h, quality.bitrate, quality.fps, I_FRAME_INTERVAL, rotation = 0)
+            val videoOk = s.prepareVideo(quality.w, quality.h, quality.bitrate, quality.fps, I_FRAME_INTERVAL, rotation = rotation)
             val audioOk = s.prepareAudio(AUDIO_SAMPLE_RATE, AUDIO_STEREO, AUDIO_BITRATE)
             if (!videoOk || !audioOk) {
                 Log.e(TAG, "prepare failed (video=$videoOk audio=$audioOk) — try a lower Quality preset")
@@ -146,6 +154,7 @@ class StreamService : Service(), ConnectChecker {
             // VPN/cellular address — unreachable, and for IPv6 an unbracketed/malformed URL).
             streamUrl = wifiRtspUrl() ?: s.getStreamClient().getEndPointConnection()
             isRunning = true
+            acquireWakeLock()   // keep the CPU/stream alive with the screen off (less heat than forcing it on)
             Log.i(TAG, "RTSP server up ($mode, ${quality.label}) at $streamUrl")
             updateNotification()
         } catch (e: Exception) {
@@ -177,7 +186,24 @@ class StreamService : Service(), ConnectChecker {
         runCatching { cam.switchCamera() }.onFailure { Log.w(TAG, "switchCamera failed", it) }
     }
 
+    // A partial wake lock keeps the CPU running so the stream survives the screen turning off — which
+    // is what we want instead of FLAG_KEEP_SCREEN_ON (a lit screen is a big heat/battery source).
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PhoneCam::stream").apply {
+            setReferenceCounted(false)
+            acquire(4 * 60 * 60 * 1000L)   // 4h safety cap; released explicitly on stop
+        }
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
+    }
+
     private fun stopStreaming() {
+        releaseWakeLock()
         stream?.let { if (it.isStreaming) it.stopStream() }
         stream = null
         isRunning = false

@@ -69,7 +69,7 @@ public class PhoneCamGui : Form
     TextBox tbIp;
     CheckBox cbMic, cbFlipH, cbFlipV;
     Button btnStart;
-    Label lblStatus, lblDot;
+    Label lblStatus, lblDot, tip;
     Panel preview;
     Label previewHint, qrLabel;
     PictureBox qrBox;
@@ -79,7 +79,7 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.4.6";
+    const string Version = "0.4.7";
     const int LocalPort = 18554, PhonePort = 8554;
     bool usbForwarded = false, running = false;
     volatile bool videoSeen = false, reachIssue = false;   // set from receiver stderr, drive the status
@@ -100,6 +100,7 @@ public class PhoneCamGui : Form
         adbExe = FindFirst(new[] { Path.Combine(b, "bin", "adb", "adb.exe"), Path.Combine(lad, "Android", "Sdk", "platform-tools", "adb.exe") });
         settingsPath = Path.Combine(lad, "PhoneCam", "gui.txt");
         logPath = Path.Combine(lad, "PhoneCam", "phonecam.log");
+        try { Directory.CreateDirectory(Path.GetDirectoryName(logPath)); File.WriteAllText(logPath, ""); } catch { }  // fresh log per session
         BuildUi();
         LoadSettings();
         Log("PhoneCam v" + Version + " started. receiver=" + (receiverExe ?? "NOT FOUND") + " adb=" + (adbExe ?? "none"));
@@ -155,7 +156,7 @@ public class PhoneCamGui : Form
         lblStatus = new Label { Text = "Idle", ForeColor = Sub, Location = new Point(44, 374), AutoSize = true, MaximumSize = new Size(220, 0) };
         Controls.Add(lblDot); Controls.Add(lblStatus);
 
-        var tip = new Label { Text = "Then pick “PhoneCam Camera” as the\nwebcam in Zoom / Teams / OBS.", ForeColor = Sub, Location = new Point(22, 428), AutoSize = true };
+        tip = new Label { Text = TipText(false), ForeColor = Sub, Location = new Point(22, 424), AutoSize = true };
         Controls.Add(tip);
 
         linkDiag = new LinkLabel { Text = "Copy diagnostics", Location = new Point(22, 472), AutoSize = true, LinkColor = Accent, ActiveLinkColor = Accent, LinkBehavior = LinkBehavior.AlwaysUnderline, Font = new Font("Segoe UI", 9f) };
@@ -189,6 +190,22 @@ public class PhoneCamGui : Form
 
     void SetStatus(Color c, string s) { lblDot.ForeColor = c; lblStatus.ForeColor = c == Sub ? Sub : Fg; lblStatus.Text = s; }
 
+    static string TipText(bool mic)
+    {
+        return mic
+            ? "In your call app pick “PhoneCam Camera” as the\ncamera and “CABLE Output” as the microphone."
+            : "Then pick “PhoneCam Camera” as the\nwebcam in Zoom / Teams / OBS.";
+    }
+
+    // Connect + Options only take effect at Start, so lock them while streaming — otherwise ticking
+    // "Use microphone" mid-stream silently does nothing and never prompts for VB-CABLE.
+    void SetInputsEnabled(bool on)
+    {
+        rbUsb.Enabled = on; rbQr.Enabled = on; rbWifi.Enabled = on; linkIp.Enabled = on;
+        tbIp.Enabled = on && rbWifi.Checked;
+        cbMic.Enabled = on; cbFlipH.Enabled = on; cbFlipV.Enabled = on;
+    }
+
     string Adb(string args)
     {
         if (adbExe == null) return "";
@@ -199,11 +216,12 @@ public class PhoneCamGui : Form
     // Timestamped rolling log — the source for "Copy diagnostics" and a file the user can share.
     void Log(string s)
     {
+        string line = DateTime.Now.ToString("HH:mm:ss ") + s;
         lock (logLock)
         {
-            logLines.Add(DateTime.Now.ToString("HH:mm:ss ") + s);
+            logLines.Add(line);
             if (logLines.Count > 500) logLines.RemoveRange(0, logLines.Count - 500);
-            try { File.WriteAllLines(logPath, logLines); } catch { }
+            try { File.AppendAllText(logPath, line + Environment.NewLine); } catch { }   // append, don't rewrite
         }
     }
 
@@ -338,6 +356,8 @@ public class PhoneCamGui : Form
 
         running = true; embedded = IntPtr.Zero;
         previewHint.Visible = true;
+        tip.Text = TipText(useMic);
+        SetInputsEnabled(false);
         btnStart.Text = "Stop"; btnStart.BackColor = Color.FromArgb(70, 74, 82);
         timer.Start();
     }
@@ -360,6 +380,8 @@ public class PhoneCamGui : Form
         pendingUseMic = useMic;
         running = true;
         previewHint.Visible = false; qrLabel.Visible = true; qrBox.Visible = true;
+        tip.Text = TipText(useMic);
+        SetInputsEnabled(false);
         btnStart.Text = "Stop"; btnStart.BackColor = Color.FromArgb(70, 74, 82);
         SetStatus(Amber, "Scan the QR with the PhoneCam app…");
 
@@ -516,6 +538,8 @@ public class PhoneCamGui : Form
         if (IsHandleCreated)
         {
             if (qrBox != null) { qrLabel.Visible = false; qrBox.Visible = false; if (qrBox.Image != null) { var i = qrBox.Image; qrBox.Image = null; i.Dispose(); } }
+            SetInputsEnabled(true);
+            tip.Text = TipText(false);
             btnStart.Text = "Start"; btnStart.BackColor = Accent;
             previewHint.Text = "Live preview appears here once you press Start."; previewHint.Visible = true;
             if (lblStatus.Text != "Stopped") SetStatus(Sub, "Idle");

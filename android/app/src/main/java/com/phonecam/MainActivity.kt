@@ -12,7 +12,6 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.View
-import android.view.WindowManager
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -58,7 +57,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) // don't sleep while streaming
+        // The screen is free to sleep — StreamService holds a partial wake lock so the stream keeps
+        // running with the screen off (a lit screen was a big source of the phone getting hot).
         setContentView(R.layout.activity_main)
 
         modeGroup = findViewById(R.id.modeGroup)
