@@ -8,11 +8,13 @@
     android:background="@color/pc_bg">
 
     <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbar"
         android:layout_width="match_parent"
         android:layout_height="?attr/actionBarSize"
         android:background="@color/pc_bg"
         app:title="PhoneCam"
         app:titleTextColor="@color/pc_text"
+        app:subtitleTextColor="@color/pc_muted"
         app:titleCentered="false" />
 
     <ScrollView

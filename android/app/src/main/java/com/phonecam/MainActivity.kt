@@ -69,6 +69,9 @@ class MainActivity : AppCompatActivity() {
         urlText = findViewById(R.id.urlText)
         pcStatus = findViewById(R.id.pcStatus)
 
+        findViewById<com.google.android.material.appbar.MaterialToolbar>(R.id.toolbar).subtitle =
+            "v" + BuildConfig.VERSION_NAME
+
         qualityInput.setSimpleItems(qualities.map { it.label }.toTypedArray())
         restoreSelections()
 

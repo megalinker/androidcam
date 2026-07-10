@@ -61,6 +61,7 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
+    const string Version = "0.4.2";
     const int LocalPort = 18554, PhonePort = 8554;
     bool usbForwarded = false, running = false;
     volatile bool videoSeen = false, reachIssue = false;   // set from receiver stderr, drive the status
@@ -83,7 +84,7 @@ public class PhoneCamGui : Form
         logPath = Path.Combine(lad, "PhoneCam", "phonecam.log");
         BuildUi();
         LoadSettings();
-        Log("PhoneCam started. receiver=" + (receiverExe ?? "NOT FOUND") + " adb=" + (adbExe ?? "none"));
+        Log("PhoneCam v" + Version + " started. receiver=" + (receiverExe ?? "NOT FOUND") + " adb=" + (adbExe ?? "none"));
         timer = new System.Windows.Forms.Timer { Interval = 700 };
         timer.Tick += OnTick;
         FormClosing += (s, e) => { SaveSettings(); StopReceiver(); };
@@ -97,7 +98,7 @@ public class PhoneCamGui : Form
 
     void BuildUi()
     {
-        Text = "PhoneCam";
+        Text = "PhoneCam v" + Version;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         ClientSize = new Size(744, 500);
@@ -108,6 +109,7 @@ public class PhoneCamGui : Form
         // Left control column
         var title = new Label { Text = "PhoneCam", Font = new Font("Segoe UI Semibold", 17f), ForeColor = Fg, Location = new Point(20, 18), AutoSize = true };
         Controls.Add(title);
+        Controls.Add(new Label { Text = "v" + Version, ForeColor = Sub, Font = new Font("Segoe UI", 9f), Location = new Point(158, 32), AutoSize = true });
 
         AddSection("Connect", 72);
         rbUsb = Radio("USB cable", 22, 108, true);
@@ -138,7 +140,7 @@ public class PhoneCamGui : Form
         var tip = new Label { Text = "Then pick “PhoneCam Camera” as the\nwebcam in Zoom / Teams / OBS.", ForeColor = Sub, Location = new Point(22, 428), AutoSize = true };
         Controls.Add(tip);
 
-        linkDiag = new LinkLabel { Text = "Copy diagnostics", Location = new Point(22, 474), AutoSize = true, LinkColor = Sub, ActiveLinkColor = Accent, LinkBehavior = LinkBehavior.HoverUnderline, Font = new Font("Segoe UI", 8.25f) };
+        linkDiag = new LinkLabel { Text = "Copy diagnostics", Location = new Point(22, 472), AutoSize = true, LinkColor = Accent, ActiveLinkColor = Accent, LinkBehavior = LinkBehavior.AlwaysUnderline, Font = new Font("Segoe UI", 9f) };
         linkDiag.LinkClicked += (s, e) => CopyDiagnostics();
         Controls.Add(linkDiag);
 
@@ -191,6 +193,7 @@ public class PhoneCamGui : Form
     {
         var sb = new StringBuilder();
         sb.AppendLine("=== PhoneCam diagnostics ===");
+        sb.AppendLine("version: " + Version);
         sb.AppendLine("time: " + DateTime.Now);
         sb.AppendLine("os: " + Environment.OSVersion + (Environment.Is64BitOperatingSystem ? " x64" : " x86"));
         sb.AppendLine("receiver: " + (receiverExe ?? "NOT FOUND"));
