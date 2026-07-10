@@ -79,7 +79,7 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.4.5";
+    const string Version = "0.4.6";
     const int LocalPort = 18554, PhonePort = 8554;
     bool usbForwarded = false, running = false;
     volatile bool videoSeen = false, reachIssue = false;   // set from receiver stderr, drive the status
@@ -379,7 +379,10 @@ public class PhoneCamGui : Form
                     if (mt.Success && mt.Groups[1].Value == pairToken && mu.Success)
                     {
                         try { var ok = Encoding.UTF8.GetBytes("OK\n"); ns.Write(ok, 0, ok.Length); } catch { }
-                        string url = mu.Groups[1].Value;
+                        // org.json (Android) escapes '/' as '\/', and we extract with a regex rather
+                        // than a JSON parser — so unescape, else the receiver gets rtsp:\/\/… and fails
+                        // with "Failed to resolve hostname \".
+                        string url = mu.Groups[1].Value.Replace("\\/", "/");
                         Log("pairing OK: phone stream = " + url);
                         BeginInvoke((Action)(() => OnPaired(url)));
                     }
