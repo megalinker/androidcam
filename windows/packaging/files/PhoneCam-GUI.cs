@@ -7,9 +7,13 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Windows.Forms;
 
 public class PhoneCamGui : Form
@@ -42,14 +46,16 @@ public class PhoneCamGui : Form
         if (DwmSetWindowAttribute(Handle, 20, ref on, 4) != 0) DwmSetWindowAttribute(Handle, 19, ref on, 4);
     }
 
-    RadioButton rbUsb, rbWifi;
+    RadioButton rbUsb, rbWifi, rbQr;
+    LinkLabel linkIp;
     TextBox tbIp;
     CheckBox cbMic, cbFlipH, cbFlipV;
     Button btnStart;
     Label lblStatus, lblDot;
     Panel preview;
-    Label previewHint;
-    Timer timer;
+    Label previewHint, qrLabel;
+    PictureBox qrBox;
+    System.Windows.Forms.Timer timer;
     Process recv;
     IntPtr embedded = IntPtr.Zero;
     readonly object logLock = new object();
@@ -57,6 +63,14 @@ public class PhoneCamGui : Form
     string receiverExe, adbExe, settingsPath;
     const int LocalPort = 18554, PhonePort = 8554;
     bool usbForwarded = false, running = false;
+
+    // --- Wi-Fi QR pairing (the phone scans a code we show and announces its pull URL back) ---
+    TcpListener pairListener;
+    Thread pairThread;
+    string pairToken;
+    bool pendingUseMic;
+    static readonly Regex reTok = new Regex("\"tok\"\\s*:\\s*\"([^\"]*)\"");
+    static readonly Regex reUrl = new Regex("\"url\"\\s*:\\s*\"([^\"]*)\"");
 
     public PhoneCamGui()
     {
@@ -67,7 +81,7 @@ public class PhoneCamGui : Form
         settingsPath = Path.Combine(lad, "PhoneCam", "gui.txt");
         BuildUi();
         LoadSettings();
-        timer = new Timer { Interval = 700 };
+        timer = new System.Windows.Forms.Timer { Interval = 700 };
         timer.Tick += OnTick;
         FormClosing += (s, e) => { SaveSettings(); StopReceiver(); };
         // Optional: connect immediately on launch (handy for a "start on login" shortcut).
@@ -83,7 +97,7 @@ public class PhoneCamGui : Form
         Text = "PhoneCam";
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(744, 452);
+        ClientSize = new Size(744, 490);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Bg; ForeColor = Fg;
         Font = new Font("Segoe UI", 9.5f);
@@ -94,34 +108,42 @@ public class PhoneCamGui : Form
 
         AddSection("Connect", 72);
         rbUsb = Radio("USB cable", 22, 108, true);
-        rbWifi = Radio("Wi-Fi", 22, 134, false);
-        tbIp = new TextBox { Location = new Point(96, 132), Width = 150, Enabled = false, BackColor = Card, ForeColor = Fg, BorderStyle = BorderStyle.FixedSingle };
+        rbQr = Radio("Wi-Fi — scan QR", 22, 134, false);
+        // Manual IP entry is a hidden fallback, revealed by the link below.
+        rbWifi = Radio("Wi-Fi — type IP", 22, 160, false); rbWifi.Visible = false;
+        tbIp = new TextBox { Location = new Point(140, 158), Width = 106, Enabled = false, Visible = false, BackColor = Card, ForeColor = Fg, BorderStyle = BorderStyle.FixedSingle };
         rbWifi.CheckedChanged += (s, e) => tbIp.Enabled = rbWifi.Checked;
-        Controls.Add(rbUsb); Controls.Add(rbWifi); Controls.Add(tbIp);
+        linkIp = new LinkLabel { Text = "Type an IP address instead", Location = new Point(24, 162), AutoSize = true, LinkColor = Sub, ActiveLinkColor = Accent, LinkBehavior = LinkBehavior.HoverUnderline, Font = new Font("Segoe UI", 8.25f) };
+        linkIp.LinkClicked += (s, e) => RevealTypeIp();
+        Controls.Add(rbUsb); Controls.Add(rbQr); Controls.Add(rbWifi); Controls.Add(tbIp); Controls.Add(linkIp);
 
-        AddSection("Options", 172);
-        cbMic = Check("Use phone microphone", 22, 196);
-        cbFlipH = Check("Flip left / right", 22, 222);
-        cbFlipV = Check("Flip up / down", 22, 248);
+        AddSection("Options", 198);
+        cbMic = Check("Use phone microphone", 22, 222);
+        cbFlipH = Check("Flip left / right", 22, 248);
+        cbFlipV = Check("Flip up / down", 22, 274);
         Controls.Add(cbMic); Controls.Add(cbFlipH); Controls.Add(cbFlipV);
 
-        btnStart = new Button { Text = "Start", Location = new Point(22, 292), Size = new Size(224, 40), FlatStyle = FlatStyle.Flat, BackColor = Accent, ForeColor = Color.White, Font = new Font("Segoe UI Semibold", 11f) };
+        btnStart = new Button { Text = "Start", Location = new Point(22, 318), Size = new Size(224, 40), FlatStyle = FlatStyle.Flat, BackColor = Accent, ForeColor = Color.White, Font = new Font("Segoe UI Semibold", 11f) };
         btnStart.FlatAppearance.BorderSize = 0;
         btnStart.Click += OnStartStop;
         Controls.Add(btnStart);
 
-        lblDot = new Label { Text = "●", ForeColor = Sub, Location = new Point(24, 346), AutoSize = true, Font = new Font("Segoe UI", 11f) };
-        lblStatus = new Label { Text = "Idle", ForeColor = Sub, Location = new Point(44, 348), AutoSize = true, MaximumSize = new Size(220, 0) };
+        lblDot = new Label { Text = "●", ForeColor = Sub, Location = new Point(24, 372), AutoSize = true, Font = new Font("Segoe UI", 11f) };
+        lblStatus = new Label { Text = "Idle", ForeColor = Sub, Location = new Point(44, 374), AutoSize = true, MaximumSize = new Size(220, 0) };
         Controls.Add(lblDot); Controls.Add(lblStatus);
 
-        var tip = new Label { Text = "Then pick “PhoneCam Camera” as the\nwebcam in Zoom / Teams / OBS.", ForeColor = Sub, Location = new Point(22, 402), AutoSize = true };
+        var tip = new Label { Text = "Then pick “PhoneCam Camera” as the\nwebcam in Zoom / Teams / OBS.", ForeColor = Sub, Location = new Point(22, 428), AutoSize = true };
         Controls.Add(tip);
 
-        // Right: embedded live preview
-        preview = new Panel { Location = new Point(260, 84), Size = new Size(468, 348), BackColor = Color.FromArgb(12, 13, 15), BorderStyle = BorderStyle.None };
+        // Right: embedded live preview (also hosts the pairing QR before a phone connects)
+        preview = new Panel { Location = new Point(260, 84), Size = new Size(468, 392), BackColor = Color.FromArgb(12, 13, 15), BorderStyle = BorderStyle.None };
         preview.Paint += (s, e) => { using (var pen = new Pen(Line)) e.Graphics.DrawRectangle(pen, 0, 0, preview.Width - 1, preview.Height - 1); };
         previewHint = new Label { Text = "Live preview appears here once you press Start.", ForeColor = Sub, BackColor = Color.FromArgb(12, 13, 15), AutoSize = true, Location = new Point(16, 16) };
-        preview.Controls.Add(previewHint);
+        // Centered as one vertical group inside the 468×392 preview panel: the QR block itself
+        // sits at the panel's vertical centre, with the caption just above it.
+        qrLabel = new Label { Text = "Scan this with the PhoneCam phone app\n(tap “Scan PC QR to connect”)", ForeColor = Fg, BackColor = Color.FromArgb(12, 13, 15), Size = new Size(468, 40), Location = new Point(0, 34), TextAlign = ContentAlignment.MiddleCenter, Visible = false };
+        qrBox = new PictureBox { Location = new Point(104, 82), Size = new Size(260, 260), SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.White, Visible = false };
+        preview.Controls.Add(previewHint); preview.Controls.Add(qrLabel); preview.Controls.Add(qrBox);
         Controls.Add(preview);
 
         if (receiverExe == null) { btnStart.Enabled = false; SetStatus(Color.IndianRed, "receiver.exe not found"); }
@@ -132,6 +154,9 @@ public class PhoneCamGui : Form
         Controls.Add(new Label { Text = t.ToUpperInvariant(), ForeColor = Sub, Font = new Font("Segoe UI", 7.5f, FontStyle.Bold), Location = new Point(24, y), AutoSize = true });
         Controls.Add(new Panel { BackColor = Line, Location = new Point(24, y + 17), Size = new Size(212, 1) });
     }
+    /// <summary>Reveal the hidden manual-IP fallback (and select it).</summary>
+    void RevealTypeIp() { linkIp.Visible = false; rbWifi.Visible = true; tbIp.Visible = true; rbWifi.Checked = true; }
+
     RadioButton Radio(string t, int x, int y, bool on) { return new RadioButton { Text = t, ForeColor = Fg, Location = new Point(x, y), AutoSize = true, Checked = on, FlatStyle = FlatStyle.Standard }; }
     CheckBox Check(string t, int x, int y) { return new CheckBox { Text = t, ForeColor = Fg, Location = new Point(x, y), AutoSize = true }; }
 
@@ -188,6 +213,9 @@ public class PhoneCamGui : Form
             useMic = false;                                          // No -> just the camera
         }
 
+        // Wi-Fi QR pairing: show a code, let the phone scan it and announce its URL to us.
+        if (rbQr.Checked) { StartQrPairing(useMic); return; }
+
         string url;
         if (rbUsb.Checked)
         {
@@ -204,6 +232,14 @@ public class PhoneCamGui : Form
             url = ip.StartsWith("rtsp://", StringComparison.OrdinalIgnoreCase) ? ip : "rtsp://" + ip + ":" + PhonePort + "/";
         }
 
+        previewHint.Text = rbUsb.Checked ? "Open PhoneCam on the phone and press Start…" : "Connecting…";
+        SetStatus(Amber, rbUsb.Checked ? "Waiting for the phone…" : "Connecting…");
+        StartReceiverWithUrl(url, useMic);
+    }
+
+    /// <summary>Launch receiver.exe against a concrete rtsp URL and begin embedding its preview.</summary>
+    void StartReceiverWithUrl(string url, bool useMic)
+    {
         var a = new List<string> { url, "--preview" };   // --preview so we can embed the feed
         if (cbFlipH.Checked) a.Add("--flip-h");
         if (cbFlipV.Checked) a.Add("--flip-v");
@@ -214,14 +250,132 @@ public class PhoneCamGui : Form
         recv = new Process { StartInfo = psi };
         recv.ErrorDataReceived += (s, ev) => { if (ev.Data != null) lock (logLock) logLines.Add(ev.Data); };
         try { recv.Start(); recv.BeginErrorReadLine(); }
-        catch (Exception ex) { MessageBox.Show("Failed to start receiver: " + ex.Message, "PhoneCam"); return; }
+        catch (Exception ex) { MessageBox.Show("Failed to start receiver: " + ex.Message, "PhoneCam"); StopReceiver(); return; }
 
         running = true; embedded = IntPtr.Zero;
-        previewHint.Text = rbUsb.Checked ? "Open PhoneCam on the phone and press Start…" : "Connecting…";
         previewHint.Visible = true;
         btnStart.Text = "Stop"; btnStart.BackColor = Color.FromArgb(70, 74, 82);
-        SetStatus(Amber, rbUsb.Checked ? "Waiting for the phone…" : "Connecting…");
         timer.Start();
+    }
+
+    /// <summary>Show a pairing QR and wait (off the UI thread) for the phone to announce its URL.</summary>
+    void StartQrPairing(bool useMic)
+    {
+        string ip = LocalIPv4();
+        if (ip == null) { MessageBox.Show("Couldn't determine this PC's Wi-Fi address. Use “type IP” instead.", "PhoneCam"); return; }
+        try { pairListener = new TcpListener(IPAddress.Any, 0); pairListener.Start(); }
+        catch (Exception ex) { MessageBox.Show("Couldn't open a pairing port: " + ex.Message, "PhoneCam"); return; }
+
+        int port = ((IPEndPoint)pairListener.LocalEndpoint).Port;
+        pairToken = Guid.NewGuid().ToString("N").Substring(0, 6);
+        string payload = "PCAM1:" + ip + ":" + port + ":" + pairToken;
+        try { qrBox.Image = MakeQr(payload); }
+        catch (Exception ex) { MessageBox.Show("Couldn't render the QR: " + ex.Message, "PhoneCam"); StopReceiver(); return; }
+
+        pendingUseMic = useMic;
+        running = true;
+        previewHint.Visible = false; qrLabel.Visible = true; qrBox.Visible = true;
+        btnStart.Text = "Stop"; btnStart.BackColor = Color.FromArgb(70, 74, 82);
+        SetStatus(Amber, "Scan the QR with the PhoneCam app…");
+
+        var ln = pairListener;
+        pairThread = new Thread(() =>
+        {
+            try
+            {
+                using (var client = ln.AcceptTcpClient())
+                using (var ns = client.GetStream())
+                {
+                    client.ReceiveTimeout = 10000;
+                    string line = new StreamReader(ns, Encoding.UTF8).ReadLine() ?? "";
+                    var mt = reTok.Match(line); var mu = reUrl.Match(line);
+                    if (mt.Success && mt.Groups[1].Value == pairToken && mu.Success)
+                    {
+                        try { var ok = Encoding.UTF8.GetBytes("OK\n"); ns.Write(ok, 0, ok.Length); } catch { }
+                        string url = mu.Groups[1].Value;
+                        BeginInvoke((Action)(() => OnPaired(url)));
+                    }
+                    else BeginInvoke((Action)(() => SetStatus(Amber, "A device tried to pair but the code didn't match.")));
+                }
+            }
+            catch { /* listener stopped (Stop pressed) or timed out */ }
+        }) { IsBackground = true };
+        pairThread.Start();
+    }
+
+    void OnPaired(string url)
+    {
+        try { if (pairListener != null) { pairListener.Stop(); pairListener = null; } } catch { }
+        qrLabel.Visible = false; qrBox.Visible = false;
+        if (qrBox.Image != null) { var img = qrBox.Image; qrBox.Image = null; img.Dispose(); }
+        previewHint.Text = "Connecting…"; SetStatus(Amber, "Phone paired — connecting…");
+        StartReceiverWithUrl(url, pendingUseMic);
+    }
+
+    static Bitmap MakeQr(string text)
+    {
+        var data = new QRCoder.QRCodeGenerator().CreateQrCode(text, QRCoder.QRCodeGenerator.ECCLevel.M);
+        byte[] png = new QRCoder.PngByteQRCode(data).GetGraphic(8);
+        using (var ms = new MemoryStream(png)) using (var tmp = new Bitmap(ms)) return new Bitmap(tmp);
+    }
+
+    /// <summary>
+    /// This PC's LAN IPv4 (the address the phone reaches us on). Prefers a real private-LAN
+    /// address (192.168/10/172.16) and skips APIPA + CGNAT/VPN (100.64/10, e.g. Tailscale/
+    /// Windscribe) — those are unreachable from the phone over the local network.
+    /// </summary>
+    static string LocalIPv4()
+    {
+        // A real LAN adapter has a default gateway; host-only virtual adapters (VirtualBox/VMware/
+        // Hyper-V/WSL/ICS) don't. So prefer a private-LAN address whose interface has a gateway.
+        var gwLan = new List<string>();   // RFC1918 + has gateway  → the real LAN
+        var gwAny = new List<string>();   // anything else with a gateway
+        var noGw = new List<string>();    // RFC1918 without a gateway (virtual host-only nets)
+        try
+        {
+            foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback ||
+                    ni.NetworkInterfaceType == NetworkInterfaceType.Tunnel) continue;
+                var props = ni.GetIPProperties();
+                bool hasGw = false;
+                foreach (var g in props.GatewayAddresses)
+                    if (g.Address.AddressFamily == AddressFamily.InterNetwork && g.Address.ToString() != "0.0.0.0") hasGw = true;
+                foreach (var ua in props.UnicastAddresses)
+                {
+                    if (ua.Address.AddressFamily != AddressFamily.InterNetwork) continue;
+                    string ip = ua.Address.ToString();
+                    if (ip.StartsWith("169.254.") || IsCgnat(ip)) continue;   // APIPA / VPN
+                    if (hasGw && IsPrivateLan(ip)) gwLan.Add(ip);
+                    else if (hasGw) gwAny.Add(ip);
+                    else if (IsPrivateLan(ip)) noGw.Add(ip);
+                }
+            }
+        }
+        catch { }
+        if (gwLan.Count > 0) return gwLan[0];
+        if (gwAny.Count > 0) return gwAny[0];
+        if (noGw.Count > 0) return noGw[0];
+        // Last resort: whatever address the default route would use.
+        try { using (var s = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+            { s.Connect("8.8.8.8", 65530); return ((IPEndPoint)s.LocalEndPoint).Address.ToString(); } }
+        catch { return null; }
+    }
+
+    static bool IsPrivateLan(string ip)
+    {
+        if (ip.StartsWith("192.168.") || ip.StartsWith("10.")) return true;
+        if (ip.StartsWith("172."))
+        { var p = ip.Split('.'); int o; if (p.Length > 1 && int.TryParse(p[1], out o)) return o >= 16 && o <= 31; }
+        return false;
+    }
+
+    static bool IsCgnat(string ip)  // 100.64.0.0/10 — carrier-grade NAT range VPNs like to use
+    {
+        if (!ip.StartsWith("100.")) return false;
+        var p = ip.Split('.'); int o;
+        return p.Length > 1 && int.TryParse(p[1], out o) && o >= 64 && o <= 127;
     }
 
     static string BuildArgs(List<string> a)
@@ -262,12 +416,14 @@ public class PhoneCamGui : Form
     {
         timer.Stop();
         embedded = IntPtr.Zero;
+        try { if (pairListener != null) { pairListener.Stop(); pairListener = null; } } catch { }
         try { if (recv != null && !recv.HasExited) recv.Kill(); } catch { }
         recv = null;
         if (usbForwarded) { Adb("forward --remove tcp:" + LocalPort); usbForwarded = false; }
         running = false;
         if (IsHandleCreated)
         {
+            if (qrBox != null) { qrLabel.Visible = false; qrBox.Visible = false; if (qrBox.Image != null) { var i = qrBox.Image; qrBox.Image = null; i.Dispose(); } }
             btnStart.Text = "Start"; btnStart.BackColor = Accent;
             previewHint.Text = "Live preview appears here once you press Start."; previewHint.Visible = true;
             if (lblStatus.Text != "Stopped") SetStatus(Sub, "Idle");
@@ -283,7 +439,7 @@ public class PhoneCamGui : Form
             {
                 var kv = line.Split(new[] { '=' }, 2); if (kv.Length != 2) continue;
                 switch (kv[0]) {
-                    case "conn": if (kv[1] == "wifi") { rbWifi.Checked = true; } break;
+                    case "conn": if (kv[1] == "wifi") RevealTypeIp(); else if (kv[1] == "qr") rbQr.Checked = true; break;
                     case "ip": tbIp.Text = kv[1]; break;
                     case "mic": cbMic.Checked = kv[1] == "1"; break;
                     case "flipH": cbFlipH.Checked = kv[1] == "1"; break;
@@ -299,7 +455,7 @@ public class PhoneCamGui : Form
         {
             Directory.CreateDirectory(Path.GetDirectoryName(settingsPath));
             File.WriteAllLines(settingsPath, new[] {
-                "conn=" + (rbWifi.Checked ? "wifi" : "usb"),
+                "conn=" + (rbQr.Checked ? "qr" : rbWifi.Checked ? "wifi" : "usb"),
                 "ip=" + tbIp.Text.Trim(),
                 "mic=" + (cbMic.Checked ? "1" : "0"),
                 "flipH=" + (cbFlipH.Checked ? "1" : "0"),
