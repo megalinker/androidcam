@@ -253,6 +253,10 @@ static int run_session(const Options& opt, PreviewWindow* preview) {
         // Lowest latency: no reordering, no demux buffering.
         av_dict_set(&opts, "reorder_queue_size", "0", 0);
         av_dict_set(&opts, "max_delay",          "0", 0);
+        // Don't spend the default 5s / 5MB analysing a stream we already know (H264 + AAC): cap it so
+        // the first frame shows quickly instead of a long "Connecting…" pause.
+        av_dict_set(&opts, "probesize",          "1000000", 0);   // 1 MB
+        av_dict_set(&opts, "analyzeduration",    "1000000", 0);   // 1 s
     }
 
     AVFormatContext* fmt = avformat_alloc_context();

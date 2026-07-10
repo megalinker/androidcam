@@ -50,7 +50,7 @@ class StreamService : Service(), ConnectChecker {
         const val EXTRA_QUALITY = "quality"
 
         const val PORT = 8554
-        const val I_FRAME_INTERVAL = 2
+        const val I_FRAME_INTERVAL = 1   // 1s GOP: faster first frame + quicker recovery after a glitch
 
         // 48 kHz matches the Windows WASAPI shared-mode rate (Phase 2 virtual mic) → no resample drift.
         const val AUDIO_SAMPLE_RATE = 48_000
