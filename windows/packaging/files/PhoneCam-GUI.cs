@@ -67,7 +67,7 @@ public class PhoneCamGui : Form
     RadioButton rbUsb, rbWifi, rbQr;
     LinkLabel linkIp, linkDiag;
     TextBox tbIp;
-    CheckBox cbMic, cbFlipH, cbFlipV;
+    CheckBox cbMic, cbFlipH, cbFlipV, cbUdp;
     Button btnStart;
     Label lblStatus, lblDot, tip;
     Panel preview;
@@ -79,7 +79,7 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.4.8";
+    const string Version = "0.4.9";
     const int LocalPort = 18554, PhonePort = 8554;
     bool usbForwarded = false, running = false;
     volatile bool videoSeen = false, reachIssue = false;   // set from receiver stderr, drive the status
@@ -120,7 +120,7 @@ public class PhoneCamGui : Form
         Text = "PhoneCam v" + Version;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(744, 500);
+        ClientSize = new Size(744, 524);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Bg; ForeColor = Fg;
         Font = new Font("Segoe UI", 9.5f);
@@ -145,26 +145,27 @@ public class PhoneCamGui : Form
         cbMic = Check("Use phone microphone", 22, 222);
         cbFlipH = Check("Flip left / right", 22, 248);
         cbFlipV = Check("Flip up / down", 22, 274);
-        Controls.Add(cbMic); Controls.Add(cbFlipH); Controls.Add(cbFlipV);
+        cbUdp = Check("Lower latency (Wi-Fi) — may glitch", 22, 300);
+        Controls.Add(cbMic); Controls.Add(cbFlipH); Controls.Add(cbFlipV); Controls.Add(cbUdp);
 
-        btnStart = new Button { Text = "Start", Location = new Point(22, 318), Size = new Size(224, 40), FlatStyle = FlatStyle.Flat, BackColor = Accent, ForeColor = Color.White, Font = new Font("Segoe UI Semibold", 11f) };
+        btnStart = new Button { Text = "Start", Location = new Point(22, 340), Size = new Size(224, 40), FlatStyle = FlatStyle.Flat, BackColor = Accent, ForeColor = Color.White, Font = new Font("Segoe UI Semibold", 11f) };
         btnStart.FlatAppearance.BorderSize = 0;
         btnStart.Click += OnStartStop;
         Controls.Add(btnStart);
 
-        lblDot = new Label { Text = "●", ForeColor = Sub, Location = new Point(24, 372), AutoSize = true, Font = new Font("Segoe UI", 11f) };
-        lblStatus = new Label { Text = "Idle", ForeColor = Sub, Location = new Point(44, 374), AutoSize = true, MaximumSize = new Size(220, 0) };
+        lblDot = new Label { Text = "●", ForeColor = Sub, Location = new Point(24, 394), AutoSize = true, Font = new Font("Segoe UI", 11f) };
+        lblStatus = new Label { Text = "Idle", ForeColor = Sub, Location = new Point(44, 396), AutoSize = true, MaximumSize = new Size(220, 0) };
         Controls.Add(lblDot); Controls.Add(lblStatus);
 
-        tip = new Label { Text = TipText(false), ForeColor = Sub, Location = new Point(22, 424), AutoSize = true };
+        tip = new Label { Text = TipText(false), ForeColor = Sub, Location = new Point(22, 446), AutoSize = true };
         Controls.Add(tip);
 
-        linkDiag = new LinkLabel { Text = "Copy diagnostics", Location = new Point(22, 472), AutoSize = true, LinkColor = Accent, ActiveLinkColor = Accent, LinkBehavior = LinkBehavior.AlwaysUnderline, Font = new Font("Segoe UI", 9f) };
+        linkDiag = new LinkLabel { Text = "Copy diagnostics", Location = new Point(22, 494), AutoSize = true, LinkColor = Accent, ActiveLinkColor = Accent, LinkBehavior = LinkBehavior.AlwaysUnderline, Font = new Font("Segoe UI", 9f) };
         linkDiag.LinkClicked += (s, e) => CopyDiagnostics();
         Controls.Add(linkDiag);
 
         // Right: embedded live preview (also hosts the pairing QR before a phone connects)
-        preview = new Panel { Location = new Point(260, 84), Size = new Size(468, 392), BackColor = Color.FromArgb(12, 13, 15), BorderStyle = BorderStyle.None };
+        preview = new Panel { Location = new Point(260, 84), Size = new Size(468, 416), BackColor = Color.FromArgb(12, 13, 15), BorderStyle = BorderStyle.None };
         preview.Paint += (s, e) => { using (var pen = new Pen(Line)) e.Graphics.DrawRectangle(pen, 0, 0, preview.Width - 1, preview.Height - 1); };
         previewHint = new Label { Text = "Live preview appears here once you press Start.", ForeColor = Sub, BackColor = Color.FromArgb(12, 13, 15), AutoSize = true, Location = new Point(16, 16) };
         // Centered as one vertical group inside the 468×392 preview panel: the QR block itself
@@ -203,7 +204,7 @@ public class PhoneCamGui : Form
     {
         rbUsb.Enabled = on; rbQr.Enabled = on; rbWifi.Enabled = on; linkIp.Enabled = on;
         tbIp.Enabled = on && rbWifi.Checked;
-        cbMic.Enabled = on; cbFlipH.Enabled = on; cbFlipV.Enabled = on;
+        cbMic.Enabled = on; cbFlipH.Enabled = on; cbFlipV.Enabled = on; cbUdp.Enabled = on;
     }
 
     string Adb(string args)
@@ -336,6 +337,9 @@ public class PhoneCamGui : Form
         var a = new List<string> { url, "--preview" };   // --preview so we can embed the feed
         if (cbFlipH.Checked) a.Add("--flip-h");
         if (cbFlipV.Checked) a.Add("--flip-v");
+        // UDP avoids TCP's retransmit stalls (lower/steadier latency on busy Wi-Fi) but can't ride the
+        // USB adb tunnel, which is TCP-only — so only over Wi-Fi/QR.
+        if (cbUdp.Checked && !usbForwarded) a.Add("--udp");
         if (useMic) { a.Add("--audio-device"); a.Add("CABLE Input"); } else a.Add("--no-audio");
 
         string args = BuildArgs(a);
@@ -560,6 +564,7 @@ public class PhoneCamGui : Form
                     case "mic": cbMic.Checked = kv[1] == "1"; break;
                     case "flipH": cbFlipH.Checked = kv[1] == "1"; break;
                     case "flipV": cbFlipV.Checked = kv[1] == "1"; break;
+                    case "udp": cbUdp.Checked = kv[1] == "1"; break;
                 }
             }
         } catch { }
@@ -576,6 +581,7 @@ public class PhoneCamGui : Form
                 "mic=" + (cbMic.Checked ? "1" : "0"),
                 "flipH=" + (cbFlipH.Checked ? "1" : "0"),
                 "flipV=" + (cbFlipV.Checked ? "1" : "0"),
+                "udp=" + (cbUdp.Checked ? "1" : "0"),
             });
         } catch { }
     }
