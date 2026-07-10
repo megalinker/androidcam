@@ -42,8 +42,26 @@ public class PhoneCamGui : Form
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
-        int on = 1;                                   // dark title bar (DWMWA_USE_IMMERSIVE_DARK_MODE)
-        if (DwmSetWindowAttribute(Handle, 20, ref on, 4) != 0) DwmSetWindowAttribute(Handle, 19, ref on, 4);
+        // Dark title bar only on Windows 11, where it reliably switches the caption text to light.
+        // On some Windows 10 builds the attribute darkens the caption but leaves the title text dark
+        // (invisible) — which made the version look "missing". A normal (light) title bar is safer
+        // there, and the version is shown in the window body regardless.
+        if (WindowsBuild() >= 22000)
+        { int on = 1; DwmSetWindowAttribute(Handle, 20, ref on, 4); }
+    }
+
+    // True OS build number (Environment.OSVersion lies for manifest-less .NET Framework apps).
+    static int WindowsBuild()
+    {
+        try
+        {
+            using (var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
+            {
+                int n; var b = k != null ? k.GetValue("CurrentBuildNumber") as string : null;
+                return (b != null && int.TryParse(b, out n)) ? n : 0;
+            }
+        }
+        catch { return 0; }
     }
 
     RadioButton rbUsb, rbWifi, rbQr;
@@ -61,7 +79,7 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.4.2";
+    const string Version = "0.4.3";
     const int LocalPort = 18554, PhonePort = 8554;
     bool usbForwarded = false, running = false;
     volatile bool videoSeen = false, reachIssue = false;   // set from receiver stderr, drive the status
