@@ -54,9 +54,16 @@ Filename: "{tmp}\redist\vc_redist.x86.exe"; Parameters: "/install /quiet /norest
 ; Register the "PhoneCam Camera" DirectShow virtual camera (64- and 32-bit).
 Filename: "{sys}\regsvr32.exe";      Parameters: "/s ""{app}\bin\softcam\x64\softcam.dll""";   StatusMsg: "Adding PhoneCam Camera (64-bit)..."; Flags: waituntilterminated
 Filename: "{syswow64}\regsvr32.exe"; Parameters: "/s ""{app}\bin\softcam\Win32\softcam.dll"""; StatusMsg: "Adding PhoneCam Camera (32-bit)..."; Flags: waituntilterminated
+; Windows Firewall: allow the phone to reach the PC (the Wi-Fi QR pairing listens for an inbound
+; connection from the phone; without this, Windows silently blocks it on first run — especially on
+; "Public" networks — and the phone stays on "waiting for PC to connect").
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""PhoneCam"" dir=in action=allow program=""{app}\PhoneCam.exe"" enable=yes profile=any"; StatusMsg: "Allowing PhoneCam through Windows Firewall..."; Flags: runhidden waituntilterminated
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""PhoneCam Receiver"" dir=in action=allow program=""{app}\bin\receiver.exe"" enable=yes profile=any"; StatusMsg: "Allowing PhoneCam through Windows Firewall..."; Flags: runhidden waituntilterminated
 ; Offer to launch.
 Filename: "{app}\PhoneCam.exe"; Description: "Start PhoneCam now"; Flags: postinstall nowait skipifsilent unchecked
 
 [UninstallRun]
 Filename: "{sys}\regsvr32.exe";      Parameters: "/s /u ""{app}\bin\softcam\x64\softcam.dll""";   RunOnceId: "unreg64"; Flags: waituntilterminated
 Filename: "{syswow64}\regsvr32.exe"; Parameters: "/s /u ""{app}\bin\softcam\Win32\softcam.dll"""; RunOnceId: "unreg86"; Flags: waituntilterminated
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""PhoneCam"""; RunOnceId: "fwdel1"; Flags: runhidden waituntilterminated
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""PhoneCam Receiver"""; RunOnceId: "fwdel2"; Flags: runhidden waituntilterminated

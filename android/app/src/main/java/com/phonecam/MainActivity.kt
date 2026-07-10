@@ -46,6 +46,8 @@ class MainActivity : AppCompatActivity() {
 
     // Wi-Fi pairing: the PC target from the last scanned QR, held across the permission prompt.
     private var pendingTarget: PcTarget? = null
+    // A note shown in the status card while streaming but not yet connected (e.g. announce failed).
+    private var pairingNote: String? = null
     private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
         result.contents?.let { onScanned(it) }
     }
@@ -105,20 +107,23 @@ class MainActivity : AppCompatActivity() {
     private fun beginPairing() {
         val target = pendingTarget ?: return
         pendingTarget = null
+        pairingNote = null
         if (!StreamService.isRunning) startStreaming()
         Toast.makeText(this, "Pairing with the PC…", Toast.LENGTH_SHORT).show()
         val mode = selectedMode().name
         Thread {
             val url = waitForStreamUrl(6000)
             if (url == null) {
-                ui.post { Toast.makeText(this, "Couldn't start the stream.", Toast.LENGTH_SHORT).show() }
+                ui.post { pairingNote = "Couldn't start the camera stream — try a lower Quality." }
                 return@Thread
             }
             val ok = PcLink.announce(target, url, mode)
             ui.post {
+                pairingNote = if (ok) null
+                else "Reached out to the PC at ${target.host} but it didn't answer — is PhoneCam open on the PC, on the same Wi‑Fi, with its firewall allowing it?"
                 Toast.makeText(
                     this,
-                    if (ok) "Sent to PC — it should connect now." else "Couldn't reach the PC. Same Wi‑Fi?",
+                    if (ok) "Sent to PC — it should connect now." else "Couldn't reach the PC at ${target.host}.",
                     Toast.LENGTH_LONG
                 ).show()
             }
@@ -205,12 +210,26 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.qualityLayout).isEnabled = !running
         qualityInput.isEnabled = !running
 
-        if (!running) return
+        if (!running) { pairingNote = null; return }
 
         urlText.text = StreamService.streamUrl ?: ""
         val connected = StreamService.clientConnected
-        pcStatus.text = if (connected) "✓ PC connected" else "Waiting for the PC to connect…"
-        pcStatus.setTextColor(ContextCompat.getColor(this, if (connected) R.color.pc_green else R.color.pc_muted))
+        if (connected) pairingNote = null
+        pcStatus.text = when {
+            connected -> "✓ PC connected"
+            pairingNote != null -> pairingNote!!
+            else -> "Waiting for the PC to connect…"
+        }
+        pcStatus.setTextColor(
+            ContextCompat.getColor(
+                this,
+                when {
+                    connected -> R.color.pc_green
+                    pairingNote != null -> R.color.pc_amber
+                    else -> R.color.pc_muted
+                }
+            )
+        )
     }
 
     override fun onResume() { super.onResume(); ui.post(poll) }

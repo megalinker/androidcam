@@ -8,5 +8,6 @@
     <color name="pc_text">#ECEEF2</color>
     <color name="pc_muted">#99A0AC</color>
     <color name="pc_green">#42BE7C</color>
+    <color name="pc_amber">#E2AA4A</color>
     <color name="pc_outline">#2E3340</color>
 </resources>

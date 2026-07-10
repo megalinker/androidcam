@@ -47,7 +47,7 @@ public class PhoneCamGui : Form
     }
 
     RadioButton rbUsb, rbWifi, rbQr;
-    LinkLabel linkIp;
+    LinkLabel linkIp, linkDiag;
     TextBox tbIp;
     CheckBox cbMic, cbFlipH, cbFlipV;
     Button btnStart;
@@ -60,9 +60,10 @@ public class PhoneCamGui : Form
     IntPtr embedded = IntPtr.Zero;
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
-    string receiverExe, adbExe, settingsPath;
+    string receiverExe, adbExe, settingsPath, logPath, pairedHost;
     const int LocalPort = 18554, PhonePort = 8554;
     bool usbForwarded = false, running = false;
+    volatile bool videoSeen = false, reachIssue = false;   // set from receiver stderr, drive the status
 
     // --- Wi-Fi QR pairing (the phone scans a code we show and announces its pull URL back) ---
     TcpListener pairListener;
@@ -79,8 +80,10 @@ public class PhoneCamGui : Form
         receiverExe = FindFirst(new[] { Path.Combine(b, "bin", "receiver.exe"), Path.Combine(b, "receiver.exe"), Path.Combine(b, "..", "build", "Release", "receiver.exe") });
         adbExe = FindFirst(new[] { Path.Combine(b, "bin", "adb", "adb.exe"), Path.Combine(lad, "Android", "Sdk", "platform-tools", "adb.exe") });
         settingsPath = Path.Combine(lad, "PhoneCam", "gui.txt");
+        logPath = Path.Combine(lad, "PhoneCam", "phonecam.log");
         BuildUi();
         LoadSettings();
+        Log("PhoneCam started. receiver=" + (receiverExe ?? "NOT FOUND") + " adb=" + (adbExe ?? "none"));
         timer = new System.Windows.Forms.Timer { Interval = 700 };
         timer.Tick += OnTick;
         FormClosing += (s, e) => { SaveSettings(); StopReceiver(); };
@@ -97,7 +100,7 @@ public class PhoneCamGui : Form
         Text = "PhoneCam";
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(744, 490);
+        ClientSize = new Size(744, 500);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Bg; ForeColor = Fg;
         Font = new Font("Segoe UI", 9.5f);
@@ -135,6 +138,10 @@ public class PhoneCamGui : Form
         var tip = new Label { Text = "Then pick “PhoneCam Camera” as the\nwebcam in Zoom / Teams / OBS.", ForeColor = Sub, Location = new Point(22, 428), AutoSize = true };
         Controls.Add(tip);
 
+        linkDiag = new LinkLabel { Text = "Copy diagnostics", Location = new Point(22, 474), AutoSize = true, LinkColor = Sub, ActiveLinkColor = Accent, LinkBehavior = LinkBehavior.HoverUnderline, Font = new Font("Segoe UI", 8.25f) };
+        linkDiag.LinkClicked += (s, e) => CopyDiagnostics();
+        Controls.Add(linkDiag);
+
         // Right: embedded live preview (also hosts the pairing QR before a phone connects)
         preview = new Panel { Location = new Point(260, 84), Size = new Size(468, 392), BackColor = Color.FromArgb(12, 13, 15), BorderStyle = BorderStyle.None };
         preview.Paint += (s, e) => { using (var pen = new Pen(Line)) e.Graphics.DrawRectangle(pen, 0, 0, preview.Width - 1, preview.Height - 1); };
@@ -167,6 +174,50 @@ public class PhoneCamGui : Form
         if (adbExe == null) return "";
         try { var psi = new ProcessStartInfo(adbExe, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
               var p = Process.Start(psi); string o = p.StandardOutput.ReadToEnd(); p.WaitForExit(4000); return o; } catch { return ""; }
+    }
+
+    // Timestamped rolling log — the source for "Copy diagnostics" and a file the user can share.
+    void Log(string s)
+    {
+        lock (logLock)
+        {
+            logLines.Add(DateTime.Now.ToString("HH:mm:ss ") + s);
+            if (logLines.Count > 500) logLines.RemoveRange(0, logLines.Count - 500);
+            try { File.WriteAllLines(logPath, logLines); } catch { }
+        }
+    }
+
+    void CopyDiagnostics()
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("=== PhoneCam diagnostics ===");
+        sb.AppendLine("time: " + DateTime.Now);
+        sb.AppendLine("os: " + Environment.OSVersion + (Environment.Is64BitOperatingSystem ? " x64" : " x86"));
+        sb.AppendLine("receiver: " + (receiverExe ?? "NOT FOUND"));
+        sb.AppendLine("chosen LAN IP: " + (LocalIPv4() ?? "none"));
+        try
+        {
+            sb.AppendLine("interfaces (up):");
+            foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                foreach (var ua in ni.GetIPProperties().UnicastAddresses)
+                    if (ua.Address.AddressFamily == AddressFamily.InterNetwork)
+                        sb.AppendLine("  " + ua.Address + "  (" + ni.Name + " / " + ni.NetworkInterfaceType + ")");
+            }
+        }
+        catch { }
+        sb.AppendLine("--- log ---");
+        lock (logLock) foreach (var l in logLines) sb.AppendLine(l);
+        try { Clipboard.SetText(sb.ToString()); MessageBox.Show("Diagnostics copied to the clipboard — paste them to share.", "PhoneCam"); }
+        catch (Exception e) { try { File.WriteAllText(logPath, sb.ToString()); } catch { } MessageBox.Show("Couldn't copy to clipboard (" + e.Message + ").\nThe log is at:\n" + logPath, "PhoneCam"); }
+    }
+
+    static string HostOf(string url)
+    {
+        try { int a = url.IndexOf("://", StringComparison.Ordinal); if (a < 0) return url; a += 3;
+              int b = url.IndexOfAny(new[] { ':', '/' }, a); return b < 0 ? url.Substring(a) : url.Substring(a, b - a); }
+        catch { return url; }
     }
 
     static bool VbCableInstalled()
@@ -213,6 +264,7 @@ public class PhoneCamGui : Form
             useMic = false;                                          // No -> just the camera
         }
 
+        Log("Start: mode=" + (rbUsb.Checked ? "usb" : rbQr.Checked ? "qr" : "wifi-ip") + " mic=" + useMic);
         // Wi-Fi QR pairing: show a code, let the phone scan it and announce its URL to us.
         if (rbQr.Checked) { StartQrPairing(useMic); return; }
 
@@ -240,17 +292,28 @@ public class PhoneCamGui : Form
     /// <summary>Launch receiver.exe against a concrete rtsp URL and begin embedding its preview.</summary>
     void StartReceiverWithUrl(string url, bool useMic)
     {
+        pairedHost = HostOf(url);
+        videoSeen = false; reachIssue = false;
         var a = new List<string> { url, "--preview" };   // --preview so we can embed the feed
         if (cbFlipH.Checked) a.Add("--flip-h");
         if (cbFlipV.Checked) a.Add("--flip-v");
         if (useMic) { a.Add("--audio-device"); a.Add("CABLE Input"); } else a.Add("--no-audio");
 
-        var psi = new ProcessStartInfo(receiverExe, BuildArgs(a)) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
-        lock (logLock) logLines.Clear();
+        string args = BuildArgs(a);
+        Log("launching receiver: " + args);
+        var psi = new ProcessStartInfo(receiverExe, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true, StandardErrorEncoding = Encoding.UTF8 };
         recv = new Process { StartInfo = psi };
-        recv.ErrorDataReceived += (s, ev) => { if (ev.Data != null) lock (logLock) logLines.Add(ev.Data); };
+        recv.ErrorDataReceived += (s, ev) =>
+        {
+            if (ev.Data == null) return;
+            Log("[recv] " + ev.Data);
+            if (ev.Data.IndexOf("[video]", StringComparison.OrdinalIgnoreCase) >= 0) videoSeen = true;
+            if (ev.Data.IndexOf("reconnect", StringComparison.OrdinalIgnoreCase) >= 0 || ev.Data.IndexOf("unreachable", StringComparison.OrdinalIgnoreCase) >= 0
+                || ev.Data.IndexOf("refused", StringComparison.OrdinalIgnoreCase) >= 0 || ev.Data.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0
+                || ev.Data.IndexOf("failed", StringComparison.OrdinalIgnoreCase) >= 0) reachIssue = true;
+        };
         try { recv.Start(); recv.BeginErrorReadLine(); }
-        catch (Exception ex) { MessageBox.Show("Failed to start receiver: " + ex.Message, "PhoneCam"); StopReceiver(); return; }
+        catch (Exception ex) { Log("receiver start FAILED: " + ex.Message); MessageBox.Show("Failed to start receiver: " + ex.Message, "PhoneCam"); StopReceiver(); return; }
 
         running = true; embedded = IntPtr.Zero;
         previewHint.Visible = true;
@@ -269,6 +332,7 @@ public class PhoneCamGui : Form
         int port = ((IPEndPoint)pairListener.LocalEndpoint).Port;
         pairToken = Guid.NewGuid().ToString("N").Substring(0, 6);
         string payload = "PCAM1:" + ip + ":" + port + ":" + pairToken;
+        Log("Wi-Fi pairing: advertising " + ip + ":" + port + " — waiting for the phone to scan");
         try { qrBox.Image = MakeQr(payload); }
         catch (Exception ex) { MessageBox.Show("Couldn't render the QR: " + ex.Message, "PhoneCam"); StopReceiver(); return; }
 
@@ -287,15 +351,18 @@ public class PhoneCamGui : Form
                 using (var ns = client.GetStream())
                 {
                     client.ReceiveTimeout = 10000;
+                    string peer = "?"; try { peer = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString(); } catch { }
                     string line = new StreamReader(ns, Encoding.UTF8).ReadLine() ?? "";
+                    Log("pairing: connection from " + peer + " -> " + (line.Length > 160 ? line.Substring(0, 160) : line));
                     var mt = reTok.Match(line); var mu = reUrl.Match(line);
                     if (mt.Success && mt.Groups[1].Value == pairToken && mu.Success)
                     {
                         try { var ok = Encoding.UTF8.GetBytes("OK\n"); ns.Write(ok, 0, ok.Length); } catch { }
                         string url = mu.Groups[1].Value;
+                        Log("pairing OK: phone stream = " + url);
                         BeginInvoke((Action)(() => OnPaired(url)));
                     }
-                    else BeginInvoke((Action)(() => SetStatus(Amber, "A device tried to pair but the code didn't match.")));
+                    else { Log("pairing: token mismatch / bad payload from " + peer); BeginInvoke((Action)(() => SetStatus(Amber, "A device tried to pair but the code didn't match."))); }
                 }
             }
             catch { /* listener stopped (Stop pressed) or timed out */ }
@@ -308,7 +375,7 @@ public class PhoneCamGui : Form
         try { if (pairListener != null) { pairListener.Stop(); pairListener = null; } } catch { }
         qrLabel.Visible = false; qrBox.Visible = false;
         if (qrBox.Image != null) { var img = qrBox.Image; qrBox.Image = null; img.Dispose(); }
-        previewHint.Text = "Connecting…"; SetStatus(Amber, "Phone paired — connecting…");
+        previewHint.Text = "Connecting…"; SetStatus(Amber, "Phone paired (" + HostOf(url) + ") — connecting…");
         StartReceiverWithUrl(url, pendingUseMic);
     }
 
@@ -406,14 +473,15 @@ public class PhoneCamGui : Form
             MoveWindow(embedded, 0, 0, preview.ClientSize.Width, preview.ClientSize.Height, true);
         }
 
-        string blob; lock (logLock) blob = string.Join("\n", logLines);
-        if (blob.Contains("[video]") || embedded != IntPtr.Zero) SetStatus(Green, "Live — select “PhoneCam Camera” in your app");
-        else if (blob.Contains("reconnecting") || blob.Contains("unreachable") || blob.Contains("failed"))
-            SetStatus(Amber, rbUsb.Checked ? "Waiting for the phone (press Start in the app)…" : "Can't reach the phone — same Wi-Fi? VPN off?");
+        if (videoSeen || embedded != IntPtr.Zero) SetStatus(Green, "Live — select “PhoneCam Camera” in your app");
+        else if (reachIssue)
+            SetStatus(Amber, rbUsb.Checked ? "Waiting for the phone (press Start in the app)…"
+                : "Can't reach the phone" + (pairedHost != null ? " at " + pairedHost : "") + " — same Wi-Fi? VPN off? Firewall?");
     }
 
     void StopReceiver()
     {
+        if (running) Log("stopped");
         timer.Stop();
         embedded = IntPtr.Zero;
         try { if (pairListener != null) { pairListener.Stop(); pairListener = null; } } catch { }
