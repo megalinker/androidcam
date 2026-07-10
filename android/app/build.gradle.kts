@@ -15,6 +15,22 @@ android {
         versionName = "0.1.0"
     }
 
+    // Release signing: CI decodes the keystore secret to a file and points these env vars at it,
+    // so every build shares one signature and users can update in place. Without the secret
+    // (local builds / forks) we fall back to debug signing so the build still works.
+    val ksPath = System.getenv("PHONECAM_KEYSTORE")
+    val hasReleaseKey = ksPath != null && java.io.File(ksPath).let { it.exists() && it.length() > 0 }
+    signingConfigs {
+        if (hasReleaseKey) {
+            create("release") {
+                storeFile = java.io.File(ksPath!!)
+                storePassword = System.getenv("PHONECAM_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("PHONECAM_KEY_ALIAS") ?: "phonecam"
+                keyPassword = System.getenv("PHONECAM_KEY_PASSWORD") ?: System.getenv("PHONECAM_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -22,6 +38,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.getByName(if (hasReleaseKey) "release" else "debug")
         }
     }
 

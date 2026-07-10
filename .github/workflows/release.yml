@@ -23,15 +23,20 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Build debug APK
+      - name: Decode release keystore
+        run: echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 -d > "$RUNNER_TEMP/phonecam-release.jks" || true
+      - name: Build release APK
         working-directory: android
+        env:
+          PHONECAM_KEYSTORE: ${{ runner.temp }}/phonecam-release.jks
+          PHONECAM_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon assembleDebug
+          ./gradlew --no-daemon assembleRelease
       - uses: actions/upload-artifact@v4
         with:
           name: apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
   # ---- Windows: build receiver + softcam, package installer + zip -----------
@@ -56,7 +61,7 @@ jobs:
         run: windows/packaging/build-windows.ps1 -Toolset v143
       - name: Assemble payload
         shell: pwsh
-        run: windows/packaging/assemble.ps1 -ApkPath (Resolve-Path apk/app-debug.apk)
+        run: windows/packaging/assemble.ps1 -ApkPath (Resolve-Path apk/app-release.apk)
       - name: Build installer (Inno Setup)
         shell: pwsh
         run: |
@@ -85,7 +90,7 @@ jobs:
         run: |
           mkdir -p release
           cp artifacts/windows/* release/
-          cp artifacts/apk/app-debug.apk release/PhoneCam.apk
+          cp artifacts/apk/app-release.apk release/PhoneCam.apk
           ls -l release
       - name: Compute tag
         id: tag
