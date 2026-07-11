@@ -79,10 +79,10 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.4.9";
+    const string Version = "0.4.10";
     const int LocalPort = 18554, PhonePort = 8554;
     bool usbForwarded = false, running = false;
-    volatile bool videoSeen = false, reachIssue = false;   // set from receiver stderr, drive the status
+    volatile bool videoSeen = false, audioSeen = false, reachIssue = false;   // from receiver stderr, drive the status
 
     // --- Wi-Fi QR pairing (the phone scans a code we show and announces its pull URL back) ---
     TcpListener pairListener;
@@ -333,7 +333,7 @@ public class PhoneCamGui : Form
     void StartReceiverWithUrl(string url, bool useMic)
     {
         pairedHost = HostOf(url);
-        videoSeen = false; reachIssue = false;
+        videoSeen = false; audioSeen = false; reachIssue = false;
         var a = new List<string> { url, "--preview" };   // --preview so we can embed the feed
         if (cbFlipH.Checked) a.Add("--flip-h");
         if (cbFlipV.Checked) a.Add("--flip-v");
@@ -351,6 +351,7 @@ public class PhoneCamGui : Form
             if (ev.Data == null) return;
             Log("[recv] " + ev.Data);
             if (ev.Data.IndexOf("[video]", StringComparison.OrdinalIgnoreCase) >= 0) videoSeen = true;
+            if (ev.Data.IndexOf("[audio] rendering", StringComparison.OrdinalIgnoreCase) >= 0) audioSeen = true;
             if (ev.Data.IndexOf("reconnect", StringComparison.OrdinalIgnoreCase) >= 0 || ev.Data.IndexOf("unreachable", StringComparison.OrdinalIgnoreCase) >= 0
                 || ev.Data.IndexOf("refused", StringComparison.OrdinalIgnoreCase) >= 0 || ev.Data.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0
                 || ev.Data.IndexOf("failed", StringComparison.OrdinalIgnoreCase) >= 0) reachIssue = true;
@@ -523,7 +524,14 @@ public class PhoneCamGui : Form
             MoveWindow(embedded, 0, 0, preview.ClientSize.Width, preview.ClientSize.Height, true);
         }
 
-        if (videoSeen || embedded != IntPtr.Zero) SetStatus(Green, "Live — select “PhoneCam Camera” in your app");
+        bool hasVideo = videoSeen || embedded != IntPtr.Zero;
+        if (hasVideo) SetStatus(Green, "Live — select “PhoneCam Camera” in your app");
+        else if (audioSeen)
+        {
+            // Mic-only: there's no video window, so the video-based detection never fires. Audio is up.
+            SetStatus(Green, "Live (mic) — pick “CABLE Output” as your microphone");
+            if (embedded == IntPtr.Zero) { previewHint.Text = "Microphone only — no video."; previewHint.Visible = true; }
+        }
         else if (reachIssue)
             SetStatus(Amber, rbUsb.Checked ? "Waiting for the phone (press Start in the app)…"
                 : "Can't reach the phone" + (pairedHost != null ? " at " + pairedHost : "") + " — same Wi-Fi? VPN off? Firewall?");
