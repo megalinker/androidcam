@@ -86,14 +86,16 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.4.17";
+    const string Version = "0.4.18";
     const int LocalPort = 18554, PhonePort = 8554;
+    const int PhoneControlPort = 8555, LocalControlPort = 18555;   // "stop the phone now" channel (USB uses the forward)
     bool usbForwarded = false, running = false;
     volatile bool videoSeen = false, audioSeen = false, reachIssue = false;   // from receiver stderr, drive the status
 
     // --- auto-reconnect: if receiver.exe dies unexpectedly, relaunch it against the same URL ---
     string lastUrl;              // the phone's rtsp URL we're (re)connecting to
     bool lastUseMic;             // the mic choice for that session, so reconnects match
+    string controlHost; int controlPort = PhoneControlPort;   // where to send "stop the phone now"
     bool manualStop = false;     // true while the user (or app close) is deliberately stopping — no reconnect
     bool reconnecting = false;   // waiting out the delay between reconnect attempts
     bool wentLive = false;       // did this URL ever produce a live feed? (tunes the give-up message)
@@ -130,7 +132,7 @@ public class PhoneCamGui : Form
         Log("PhoneCam v" + Version + " started. receiver=" + (receiverExe ?? "NOT FOUND") + " adb=" + (adbExe ?? "none"));
         timer = new System.Windows.Forms.Timer { Interval = 700 };
         timer.Tick += OnTick;
-        FormClosing += (s, e) => { SaveSettings(); StopReceiver(); };
+        FormClosing += (s, e) => { SaveSettings(); if (running || reconnecting) SendPhoneStop(true); StopReceiver(); };
         // Optional: connect immediately on launch (handy for a "start on login" shortcut).
         if (Array.IndexOf(Environment.GetCommandLineArgs(), "-autostart") >= 0)
             Shown += (s, e) => { if (!running) StartReceiver(); };
@@ -329,7 +331,7 @@ public class PhoneCamGui : Form
 
     void OnStartStop(object sender, EventArgs e)
     {
-        if (running || reconnecting) { manualStop = true; StopReceiver(); }   // deliberate stop — don't auto-reconnect
+        if (running || reconnecting) { manualStop = true; SendPhoneStop(); StopReceiver(); }   // deliberate stop — tell the phone, don't auto-reconnect
         else StartReceiver();
     }
 
@@ -388,6 +390,7 @@ public class PhoneCamGui : Form
             if (adbExe == null) { MessageBox.Show("adb not found (needed for USB). Use Wi-Fi instead.", "PhoneCam"); return; }
             if (!Regex.IsMatch(Adb("devices"), @"\bdevice\b")) { MessageBox.Show("No phone detected over USB.\n\nEnable Developer Options → USB debugging, plug in, tap “Allow”. Or use Wi-Fi.", "PhoneCam"); return; }
             Adb("forward tcp:" + LocalPort + " tcp:" + PhonePort);
+            Adb("forward tcp:" + LocalControlPort + " tcp:" + PhoneControlPort);   // so Stop can reach the phone over USB
             usbForwarded = true;
             url = "rtsp://127.0.0.1:" + LocalPort + "/";
         }
@@ -407,6 +410,9 @@ public class PhoneCamGui : Form
     void StartReceiverWithUrl(string url, bool useMic)
     {
         lastUrl = url; lastUseMic = useMic; reconnecting = false;   // remember the target for auto-reconnect
+        // Where to send "stop now": the phone's IP over Wi-Fi, or the forwarded loopback port over USB.
+        controlHost = HostOf(url);
+        controlPort = usbForwarded ? LocalControlPort : PhoneControlPort;
         pairedHost = HostOf(url);
         videoSeen = false; audioSeen = false; reachIssue = false;
         var a = new List<string> { url, "--preview" };   // --preview so we can embed the feed
@@ -657,6 +663,32 @@ public class PhoneCamGui : Form
         else if (reachIssue)
             SetStatus(Amber, rbUsb.Checked ? "Waiting for the phone (press Start in the app)…"
                 : "Can't reach the phone" + (pairedHost != null ? " at " + pairedHost : "") + " — same Wi-Fi? VPN off? Firewall?");
+    }
+
+    /// <summary>Ask the phone to stop streaming now (deliberate PC-side Stop). Async by default so an
+    /// unreachable/old phone can't hang the UI; pass wait=true on app-close so it isn't cut off by exit.</summary>
+    void SendPhoneStop(bool wait = false)
+    {
+        string host = controlHost; int port = controlPort;
+        if (string.IsNullOrEmpty(host)) return;
+        Log("sending stop to phone " + host + ":" + port);
+        Action send = delegate
+        {
+            try
+            {
+                using (var c = new TcpClient())
+                {
+                    var ar = c.BeginConnect(host, port, null, null);
+                    if (!ar.AsyncWaitHandle.WaitOne(1500)) return;   // phone unreachable or too old — give up quietly
+                    c.EndConnect(ar);
+                    var b = Encoding.UTF8.GetBytes("PCAM-STOP\n");
+                    var ns = c.GetStream(); ns.Write(b, 0, b.Length); ns.Flush();
+                }
+            }
+            catch { }
+        };
+        if (wait) send();
+        else ThreadPool.QueueUserWorkItem(delegate { send(); });
     }
 
     void StopReceiver()

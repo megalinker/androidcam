@@ -56,6 +56,11 @@ class StreamService : Service(), ConnectChecker {
         const val EXTRA_QUALITY = "quality"
 
         const val PORT = 8554
+        // A tiny control port: the PC connects and sends "PCAM-STOP" so pressing Stop on the PC stops
+        // the phone at once, instead of leaving it waiting for a reconnect. Only a deliberate PC-side
+        // Stop sends this — a mere client drop (blip) does not, so auto-reconnect still works.
+        const val CONTROL_PORT = 8555
+        private const val CONTROL_STOP = "PCAM-STOP"
         const val I_FRAME_INTERVAL = 1   // 1s GOP: faster first frame + quicker recovery after a glitch
 
         // Auto-stop after this long with no PC pulling — the encoder/camera run whether or not anyone
@@ -105,6 +110,7 @@ class StreamService : Service(), ConnectChecker {
 
     private var stream: RtspServerStream? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var controlServer: java.net.ServerSocket? = null
 
     // Battery guard: auto-stop if no PC connects for IDLE_TIMEOUT_MS. lastClientMs = the last time a
     // client was connected (or the stream start), so the timeout counts from "nobody watching".
@@ -212,6 +218,7 @@ class StreamService : Service(), ConnectChecker {
             acquireWakeLock()   // keep the CPU/stream alive with the screen off (less heat than forcing it on)
             lastClientMs = SystemClock.elapsedRealtime()
             idleHandler.postDelayed(idleCheck, IDLE_CHECK_MS)   // auto-stop if no PC ever connects
+            startControlListener()   // let the PC's Stop button stop us immediately
             Log.i(TAG, "RTSP server up ($mode, ${quality.label}) at $streamUrl")
             updateNotification()
         } catch (e: Exception) {
@@ -244,6 +251,41 @@ class StreamService : Service(), ConnectChecker {
         runCatching { cam.switchCamera() }.onFailure { Log.w(TAG, "switchCamera failed", it) }
     }
 
+    // Listen for the PC's "stop now" command on a background thread. One connection, one line: if it's
+    // CONTROL_STOP we stop the stream on the main thread. Closing controlServer in stopStreaming()
+    // unblocks accept() and ends the loop. Any bind/read failure just degrades to the old behaviour
+    // (the phone keeps waiting), so this is best-effort and never crashes the service.
+    private fun startControlListener() {
+        Thread {
+            val srv = try {
+                java.net.ServerSocket().apply { reuseAddress = true; bind(java.net.InetSocketAddress(CONTROL_PORT)) }
+            } catch (e: Exception) {
+                Log.w(TAG, "control listener bind failed", e); return@Thread
+            }
+            controlServer = srv
+            Log.i(TAG, "control listener on $CONTROL_PORT")
+            try {
+                while (isRunning) {
+                    val client = try { srv.accept() } catch (e: Exception) { break }
+                    try {
+                        client.soTimeout = 3000
+                        val line = client.getInputStream().bufferedReader(Charsets.UTF_8).readLine()?.trim()
+                        if (line == CONTROL_STOP) {
+                            Log.i(TAG, "PC sent stop — stopping stream immediately")
+                            idleHandler.post { stopStreaming() }
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "control read failed", e)
+                    } finally {
+                        runCatching { client.close() }
+                    }
+                }
+            } finally {
+                runCatching { srv.close() }
+            }
+        }.apply { isDaemon = true }.start()
+    }
+
     // A partial wake lock keeps the CPU running so the stream survives the screen turning off — which
     // is what we want instead of FLAG_KEEP_SCREEN_ON (a lit screen is a big heat/battery source).
     private fun acquireWakeLock() {
@@ -262,6 +304,7 @@ class StreamService : Service(), ConnectChecker {
 
     private fun stopStreaming() {
         idleHandler.removeCallbacks(idleCheck)
+        runCatching { controlServer?.close() }; controlServer = null   // unblocks the accept() loop
         releaseWakeLock()
         stream?.let { if (it.isStreaming) it.stopStream() }
         stream = null
