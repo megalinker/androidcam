@@ -7,6 +7,8 @@
 #include <mmreg.h>
 #include <cstdio>
 #include <cctype>
+#include <cmath>
+#include <cstdint>
 #include <algorithm>
 
 extern "C" {
@@ -47,6 +49,16 @@ bool mixToAvFormat(const WAVEFORMATEX* wf, AVSampleFormat* out) {
     return false;
 }
 
+// Soft limiter: transparent below the knee, then smoothly approaches +/-1.0 so a boosted
+// signal compresses instead of hard-clipping into crackle.
+inline float softLimit(float x) {
+    const float t = 0.8f;
+    float a = std::fabs(x);
+    if (a <= t) return x;
+    float sign = x < 0.0f ? -1.0f : 1.0f;
+    return sign * (t + (1.0f - t) * (1.0f - std::exp(-(a - t) / (1.0f - t))));
+}
+
 } // namespace
 
 struct WasapiSink::Impl {
@@ -68,13 +80,15 @@ struct WasapiSink::Impl {
     uint8_t* buf = nullptr;   // interleaved resample scratch
     int bufSamples = 0;
     bool started = false;
+    float gainLinear = 1.0f;   // mic boost (linear), applied with a soft limiter before render
 };
 
 WasapiSink::WasapiSink() : p_(new Impl) {}
 WasapiSink::~WasapiSink() { Stop(); delete p_; p_ = nullptr; }
 
-bool WasapiSink::Init(const AVCodecContext* dec, const std::string& deviceMatch) {
+bool WasapiSink::Init(const AVCodecContext* dec, const std::string& deviceMatch, float gainDb) {
     Impl& s = *p_;
+    s.gainLinear = std::pow(10.0f, gainDb / 20.0f);
 
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     s.comInited = SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE;
@@ -160,8 +174,8 @@ bool WasapiSink::Init(const AVCodecContext* dec, const std::string& deviceMatch)
     hr = s.client->Start();
     if (FAILED(hr)) return false;
     s.started = true;
-    fprintf(stderr, "[audio] rendering: %d Hz, %d ch, %s\n",
-            s.outRate, s.outChannels, av_get_sample_fmt_name(s.outFmt));
+    fprintf(stderr, "[audio] rendering: %d Hz, %d ch, %s (boost %.1f dB)\n",
+            s.outRate, s.outChannels, av_get_sample_fmt_name(s.outFmt), 20.0f * std::log10(s.gainLinear));
     return true;
 }
 
@@ -182,6 +196,27 @@ bool WasapiSink::WriteFrame(const AVFrame* frame) {
     int got = swr_convert(s.swr, &s.buf, outNb,
                           (const uint8_t* const*)frame->extended_data, frame->nb_samples);
     if (got < 0) return false;
+
+    // Mic boost: gain then soft-limit, in whatever interleaved sample format the endpoint wants.
+    if (s.gainLinear != 1.0f && got > 0) {
+        int n = got * s.outChannels;
+        if (s.outFmt == AV_SAMPLE_FMT_FLT) {
+            float* f = reinterpret_cast<float*>(s.buf);
+            for (int i = 0; i < n; ++i) f[i] = softLimit(f[i] * s.gainLinear);
+        } else if (s.outFmt == AV_SAMPLE_FMT_S16) {
+            int16_t* q = reinterpret_cast<int16_t*>(s.buf);
+            for (int i = 0; i < n; ++i) {
+                float v = softLimit((q[i] / 32768.0f) * s.gainLinear);
+                q[i] = (int16_t)std::lrint(v * 32767.0f);
+            }
+        } else if (s.outFmt == AV_SAMPLE_FMT_S32) {
+            int32_t* q = reinterpret_cast<int32_t*>(s.buf);
+            for (int i = 0; i < n; ++i) {
+                float v = softLimit((float)(q[i] / 2147483648.0) * s.gainLinear);
+                q[i] = (int32_t)std::llrint((double)v * 2147483647.0);
+            }
+        }
+    }
 
     // Push into the WASAPI render buffer, waiting for space as it drains at real time.
     int written = 0, guard = 0;

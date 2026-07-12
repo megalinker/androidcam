@@ -68,6 +68,8 @@ public class PhoneCamGui : Form
     LinkLabel linkIp, linkDiag;
     TextBox tbIp;
     CheckBox cbMic, cbFlipH, cbFlipV, cbUdp;
+    ComboBox cbBoost;
+    static readonly int[] BoostDb = { 0, 6, 12, 18 };   // Off / Low / Med / High
     Button btnStart;
     Label lblStatus, lblDot, tip;
     Panel preview;
@@ -79,7 +81,7 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.4.10";
+    const string Version = "0.4.11";
     const int LocalPort = 18554, PhonePort = 8554;
     bool usbForwarded = false, running = false;
     volatile bool videoSeen = false, audioSeen = false, reachIssue = false;   // from receiver stderr, drive the status
@@ -142,11 +144,16 @@ public class PhoneCamGui : Form
         Controls.Add(rbUsb); Controls.Add(rbQr); Controls.Add(rbWifi); Controls.Add(tbIp); Controls.Add(linkIp);
 
         AddSection("Options", 198);
-        cbMic = Check("Use phone microphone", 22, 222);
+        cbMic = Check("Use microphone", 22, 222);
+        cbBoost = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(150, 219), Width = 96, FlatStyle = FlatStyle.Flat, BackColor = Card, ForeColor = Fg };
+        cbBoost.Items.AddRange(new object[] { "Boost: Off", "Boost: Low", "Boost: Med", "Boost: High" });
+        cbBoost.SelectedIndex = 2;   // Medium (~+12 dB) by default — phone mics are quiet
+        cbMic.CheckedChanged += (s, e) => cbBoost.Enabled = cbMic.Checked;
+        cbBoost.Enabled = cbMic.Checked;
         cbFlipH = Check("Flip left / right", 22, 248);
         cbFlipV = Check("Flip up / down", 22, 274);
         cbUdp = Check("Lower latency (Wi-Fi) — may glitch", 22, 300);
-        Controls.Add(cbMic); Controls.Add(cbFlipH); Controls.Add(cbFlipV); Controls.Add(cbUdp);
+        Controls.Add(cbMic); Controls.Add(cbBoost); Controls.Add(cbFlipH); Controls.Add(cbFlipV); Controls.Add(cbUdp);
 
         btnStart = new Button { Text = "Start", Location = new Point(22, 340), Size = new Size(224, 40), FlatStyle = FlatStyle.Flat, BackColor = Accent, ForeColor = Color.White, Font = new Font("Segoe UI Semibold", 11f) };
         btnStart.FlatAppearance.BorderSize = 0;
@@ -205,6 +212,7 @@ public class PhoneCamGui : Form
         rbUsb.Enabled = on; rbQr.Enabled = on; rbWifi.Enabled = on; linkIp.Enabled = on;
         tbIp.Enabled = on && rbWifi.Checked;
         cbMic.Enabled = on; cbFlipH.Enabled = on; cbFlipV.Enabled = on; cbUdp.Enabled = on;
+        cbBoost.Enabled = on && cbMic.Checked;
     }
 
     string Adb(string args)
@@ -340,7 +348,13 @@ public class PhoneCamGui : Form
         // UDP avoids TCP's retransmit stalls (lower/steadier latency on busy Wi-Fi) but can't ride the
         // USB adb tunnel, which is TCP-only — so only over Wi-Fi/QR.
         if (cbUdp.Checked && !usbForwarded) a.Add("--udp");
-        if (useMic) { a.Add("--audio-device"); a.Add("CABLE Input"); } else a.Add("--no-audio");
+        if (useMic)
+        {
+            a.Add("--audio-device"); a.Add("CABLE Input");
+            int bi = cbBoost.SelectedIndex; if (bi < 0 || bi >= BoostDb.Length) bi = 2;
+            if (BoostDb[bi] != 0) { a.Add("--mic-gain"); a.Add(BoostDb[bi].ToString()); }
+        }
+        else a.Add("--no-audio");
 
         string args = BuildArgs(a);
         Log("launching receiver: " + args);
@@ -573,6 +587,7 @@ public class PhoneCamGui : Form
                     case "flipH": cbFlipH.Checked = kv[1] == "1"; break;
                     case "flipV": cbFlipV.Checked = kv[1] == "1"; break;
                     case "udp": cbUdp.Checked = kv[1] == "1"; break;
+                    case "boost": { int bi; if (int.TryParse(kv[1], out bi) && bi >= 0 && bi < BoostDb.Length) cbBoost.SelectedIndex = bi; } break;
                 }
             }
         } catch { }
@@ -590,6 +605,7 @@ public class PhoneCamGui : Form
                 "flipH=" + (cbFlipH.Checked ? "1" : "0"),
                 "flipV=" + (cbFlipV.Checked ? "1" : "0"),
                 "udp=" + (cbUdp.Checked ? "1" : "0"),
+                "boost=" + cbBoost.SelectedIndex,
             });
         } catch { }
     }

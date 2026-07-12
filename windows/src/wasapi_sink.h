@@ -28,7 +28,9 @@ public:
     // deviceMatch: case-insensitive substring of the render endpoint's friendly name
     // (e.g. "PhoneCam"), or empty to use the system default render endpoint.
     // `dec` supplies the source audio format (rate / channel layout / sample format).
-    bool Init(const AVCodecContext* dec, const std::string& deviceMatch);
+    // gainDb boosts the (typically quiet) phone-mic level; a soft limiter after the gain
+    // keeps peaks from clipping. 0 dB = passthrough.
+    bool Init(const AVCodecContext* dec, const std::string& deviceMatch, float gainDb = 0.0f);
 
     // Resample `frame` to the endpoint mix format and render it. Returns false on a fatal error.
     bool WriteFrame(const AVFrame* frame);
