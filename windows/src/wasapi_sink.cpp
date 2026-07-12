@@ -102,10 +102,16 @@ struct Biquad {
 // Named presets expand to a band list; anything else is treated as a band list already.
 std::string expandEqPreset(const std::string& name) {
     std::string p = lower(name);
+    // Gentle, "tasteful" presets (2-4 dB moves).
     if (p == "clarity") return "hp:80:0.7:0;peak:300:1:-2.5;peak:3500:1:3";
     if (p == "warm")    return "hp:70:0.7:0;ls:200:0.7:3;peak:3000:1:1.5;hs:9000:0.7:-2";
     if (p == "bright")  return "hp:80:0.7:0;peak:4000:1.2:4;hs:10000:0.7:3";
     if (p == "podcast") return "hp:80:0.7:0;peak:250:1:-2;peak:3000:1:2.5;hs:9000:0.7:1.5";
+    // Radical "+" variants of each: same character, much bigger moves (5-7 dB) so the effect is obvious.
+    if (p == "clarity+") return "hp:90:0.7:0;peak:320:1.1:-5;peak:3500:1.2:6";
+    if (p == "warm+")    return "hp:70:0.7:0;ls:230:0.7:6;peak:2800:1:3;hs:9000:0.7:-4";
+    if (p == "bright+")  return "hp:85:0.7:0;peak:250:1:-3;peak:4500:1.3:7;hs:11000:0.7:6";
+    if (p == "podcast+") return "hp:85:0.7:0;peak:250:1.1:-4;peak:3200:1:5;hs:9500:0.7:4";
     return name;
 }
 

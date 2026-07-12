@@ -74,7 +74,7 @@ public class PhoneCamGui : Form
     bool suppressEqDialog = false;   // don't pop the editor when we set the EQ index programmatically
     static readonly int[] BoostDb = { 0, 6, 12, 18 };   // Off / Low / Med / High
     // EQ dropdown index -> receiver preset name; index 5 ("custom") uses customEq instead.
-    static readonly string[] EqPreset = { "", "clarity", "warm", "bright", "podcast", "custom" };
+    static readonly string[] EqPreset = { "", "clarity", "warm", "bright", "podcast", "clarity+", "warm+", "bright+", "podcast+", "custom" };
     Button btnStart;
     Label lblStatus, lblDot, tip;
     Panel preview;
@@ -86,7 +86,7 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.4.15";
+    const string Version = "0.4.16";
     const int LocalPort = 18554, PhonePort = 8554;
     bool usbForwarded = false, running = false;
     volatile bool videoSeen = false, audioSeen = false, reachIssue = false;   // from receiver stderr, drive the status
@@ -154,7 +154,8 @@ public class PhoneCamGui : Form
         cbBoost.Items.AddRange(new object[] { "Boost: Off", "Boost: Low", "Boost: Med", "Boost: High" });
         cbBoost.SelectedIndex = 2;   // Medium (~+12 dB) by default — phone mics are quiet
         cbEq = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(150, 247), Width = 96, FlatStyle = FlatStyle.Flat, BackColor = Card, ForeColor = Fg };
-        cbEq.Items.AddRange(new object[] { "EQ: Off", "EQ: Clarity", "EQ: Warm", "EQ: Bright", "EQ: Podcast", "EQ: Custom…" });
+        cbEq.Items.AddRange(new object[] { "EQ: Off", "EQ: Clarity", "EQ: Warm", "EQ: Bright", "EQ: Podcast",
+                                           "EQ: Clarity+", "EQ: Warm+", "EQ: Bright+", "EQ: Podcast+", "EQ: Custom…" });
         cbEq.SelectedIndex = 0;
         cbEq.SelectedIndexChanged += OnEqChanged;
         cbMic.CheckedChanged += (s, e) => { cbBoost.Enabled = cbMic.Checked; cbEq.Enabled = cbMic.Checked; };
@@ -313,15 +314,16 @@ public class PhoneCamGui : Form
     void OnEqChanged(object sender, EventArgs e)
     {
         if (suppressEqDialog) return;
-        if (cbEq.SelectedIndex == 5)
+        int idx = cbEq.SelectedIndex;
+        if (idx >= 0 && idx < EqPreset.Length && EqPreset[idx] == "custom")
         {
             using (var dlg = new EqEditorForm(customEq))
             {
-                if (dlg.ShowDialog(this) == DialogResult.OK) { customEq = dlg.Result; prevEqIndex = 5; }
+                if (dlg.ShowDialog(this) == DialogResult.OK) { customEq = dlg.Result; prevEqIndex = idx; }
                 else { suppressEqDialog = true; cbEq.SelectedIndex = prevEqIndex; suppressEqDialog = false; }
             }
         }
-        else prevEqIndex = cbEq.SelectedIndex;
+        else prevEqIndex = idx;
     }
 
     /// <summary>The --eq value for the current selection: a preset name, or the custom band list.</summary>
