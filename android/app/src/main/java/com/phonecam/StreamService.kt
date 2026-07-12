@@ -52,6 +52,14 @@ class StreamService : Service(), ConnectChecker {
         const val PORT = 8554
         const val I_FRAME_INTERVAL = 1   // 1s GOP: faster first frame + quicker recovery after a glitch
 
+        // Mic-only still has to run the camera+video encoder (the RTSP server won't answer a client
+        // until the video encoder emits a keyframe) — but that video is never sent, so encode a tiny,
+        // low-fps frame to keep battery/heat down instead of a full 1080p30 stream nobody receives.
+        const val MIC_ONLY_W = 176
+        const val MIC_ONLY_H = 144
+        const val MIC_ONLY_FPS = 10
+        const val MIC_ONLY_BITRATE = 80_000
+
         // 48 kHz matches the Windows WASAPI shared-mode rate (Phase 2 virtual mic) → no resample drift.
         const val AUDIO_SAMPLE_RATE = 48_000
         const val AUDIO_BITRATE = 128_000
@@ -140,7 +148,10 @@ class StreamService : Service(), ConnectChecker {
             // RootEncoder's startStream() starts BOTH encoders regardless of No*Source, so we must
             // prepare BOTH even in single-track modes — otherwise the unused encoder throws
             // "…Encoder not prepared yet" on start. setOnly*/No*Source handle what's actually sent.
-            val videoOk = s.prepareVideo(quality.w, quality.h, quality.bitrate, quality.fps, I_FRAME_INTERVAL, rotation = rotation)
+            val videoOk = if (mode == Mode.MIC_ONLY)
+                s.prepareVideo(MIC_ONLY_W, MIC_ONLY_H, MIC_ONLY_BITRATE, MIC_ONLY_FPS, I_FRAME_INTERVAL, rotation = rotation)
+            else
+                s.prepareVideo(quality.w, quality.h, quality.bitrate, quality.fps, I_FRAME_INTERVAL, rotation = rotation)
             val audioOk = s.prepareAudio(AUDIO_SAMPLE_RATE, AUDIO_STEREO, AUDIO_BITRATE)
             if (!videoOk || !audioOk) {
                 Log.e(TAG, "prepare failed (video=$videoOk audio=$audioOk) — try a lower Quality preset")
