@@ -6,6 +6,8 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.Color
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -15,6 +17,7 @@ import com.pedro.common.ConnectChecker
 import com.pedro.encoder.input.sources.audio.AudioSource
 import com.pedro.encoder.input.sources.audio.MicrophoneSource
 import com.pedro.encoder.input.sources.audio.NoAudioSource
+import com.pedro.encoder.input.sources.video.BitmapSource
 import com.pedro.encoder.input.sources.video.Camera2Source
 import com.pedro.encoder.input.sources.video.VideoSource
 import com.pedro.rtspserver.RtspServerStream
@@ -111,11 +114,15 @@ class StreamService : Service(), ConnectChecker {
         if (isRunning) return
         clientConnected = false
 
-        // Always use the real camera — even in MIC_ONLY. RootEncoder's RTSP server won't answer any
-        // client until the video encoder emits its first keyframe (SPS/PPS via onVideoInfo); a
-        // NoVideoSource never produces one, so the server hangs. So we open the camera to unblock the
-        // server, then setOnlyAudio(true) (below) keeps video out of the SDP so the PC only gets audio.
-        val video: VideoSource = Camera2Source(this)
+        // The RTSP server won't answer a client until the video encoder emits its first keyframe
+        // (SPS/PPS via onVideoInfo), and a NoVideoSource never produces one. Camera modes use the real
+        // camera; MIC_ONLY feeds a frozen 16x16 black bitmap instead, so the encoder still emits
+        // keyframes but the camera sensor never powers on (a static frame encodes to ~nothing) — the
+        // real battery/heat fix. setOnlyAudio(true) below keeps the dummy video out of the SDP.
+        val video: VideoSource = if (mode == Mode.MIC_ONLY)
+            BitmapSource(Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) })
+        else
+            Camera2Source(this)
         val audio: AudioSource = if (mode == Mode.CAMERA_ONLY) NoAudioSource() else MicrophoneSource()
 
         try {
@@ -239,7 +246,8 @@ class StreamService : Service(), ConnectChecker {
         createChannel()
         val notif = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA // camera is opened in every mode
+            var type = 0
+            if (mode != Mode.MIC_ONLY) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
             if (mode != Mode.CAMERA_ONLY) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             startForeground(NOTIF_ID, notif, type)
         } else {

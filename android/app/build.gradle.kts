@@ -13,8 +13,8 @@ android {
         applicationId = "com.phonecam"
         minSdk = 21
         targetSdk = 34
-        versionCode = 16
-        versionName = "0.4.12"
+        versionCode = 17
+        versionName = "0.4.13"
     }
 
     // Release signing: CI decodes the keystore secret to a file and points these env vars at it,
