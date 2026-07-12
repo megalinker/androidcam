@@ -120,7 +120,7 @@ class MainActivity : AppCompatActivity() {
                 ui.post { pairingNote = "Couldn't start the camera stream — try a lower Quality." }
                 return@Thread
             }
-            val ok = PcLink.announce(target, url, mode)
+            val ok = PcLink.announce(target, url, mode, deviceName())
             ui.post {
                 pairingNote = if (ok) null
                 else "Reached out to the PC at ${target.host} but it didn't answer — is PhoneCam open on the PC, on the same Wi‑Fi, with its firewall allowing it?"
@@ -131,6 +131,14 @@ class MainActivity : AppCompatActivity() {
                 ).show()
             }
         }.start()
+    }
+
+    /** A friendly name for this phone, sent to the PC so it can save us as a device (e.g. "Pixel 9 Pro"). */
+    private fun deviceName(): String {
+        val model = Build.MODEL ?: "phone"
+        val maker = Build.MANUFACTURER ?: ""
+        return if (maker.isNotEmpty() && !model.startsWith(maker, ignoreCase = true))
+            "$maker $model" else model
     }
 
     private fun waitForStreamUrl(timeoutMs: Long): String? {
@@ -218,9 +226,13 @@ class MainActivity : AppCompatActivity() {
         urlText.text = StreamService.streamUrl ?: ""
         val connected = StreamService.clientConnected
         if (connected) pairingNote = null
+        // After a PC has connected once and dropped, say so plainly (it's not a fresh "waiting") and
+        // make clear the phone will stop itself — so the user needn't hunt for the Stop button.
+        val dropped = !connected && StreamService.everConnected && pairingNote == null
         pcStatus.text = when {
             connected -> "✓ PC connected"
             pairingNote != null -> pairingNote!!
+            dropped -> "PC disconnected — waiting to reconnect (auto-stops soon)…"
             else -> "Waiting for the PC to connect…"
         }
         pcStatus.setTextColor(
@@ -228,7 +240,7 @@ class MainActivity : AppCompatActivity() {
                 this,
                 when {
                     connected -> R.color.pc_green
-                    pairingNote != null -> R.color.pc_amber
+                    pairingNote != null || dropped -> R.color.pc_amber
                     else -> R.color.pc_muted
                 }
             )

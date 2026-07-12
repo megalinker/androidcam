@@ -31,11 +31,11 @@ object PcLink {
      * Open a short TCP connection to the PC and send one JSON line with our pull URL. Blocking —
      * call from a background thread. Returns true if the PC accepted the connection and bytes.
      */
-    fun announce(target: PcTarget, url: String, mode: String): Boolean = try {
+    fun announce(target: PcTarget, url: String, mode: String, name: String): Boolean = try {
         Socket().use { s ->
             s.connect(InetSocketAddress(target.host, target.port), 4000)
             val line = JSONObject()
-                .put("v", 1).put("tok", target.token).put("url", url).put("mode", mode)
+                .put("v", 1).put("tok", target.token).put("url", url).put("mode", mode).put("name", name)
                 .toString() + "\n"
             s.getOutputStream().apply { write(line.toByteArray(Charsets.UTF_8)); flush() }
             // Best-effort read of the PC's "OK" ack; delivery already succeeded above.

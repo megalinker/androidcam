@@ -62,6 +62,10 @@ class StreamService : Service(), ConnectChecker {
         // is watching, so a stream left on with no viewer is pure battery waste. Generous enough not to
         // interrupt the normal "start, then open Discord" flow.
         private const val IDLE_TIMEOUT_MS = 5 * 60 * 1000L
+        // Once a PC has connected and then dropped, wait only this long before auto-stopping: either the
+        // PC is reconnecting (it retries within seconds) or the session is over. Stops the phone from
+        // "streaming forever" after the PC side is closed, without cutting off a quick reconnect.
+        private const val IDLE_AFTER_DISCONNECT_MS = 2 * 60 * 1000L
         private const val IDLE_CHECK_MS = 30 * 1000L
 
         // Mic-only still has to run the camera+video encoder (the RTSP server won't answer a client
@@ -92,6 +96,11 @@ class StreamService : Service(), ConnectChecker {
         // True while a PC (RTSP client) is pulling the stream. Drives the "PC connected ✓" UI.
         @Volatile var clientConnected: Boolean = false
             private set
+
+        // True once any PC has connected this session (stays true after it drops). Lets the UI say
+        // "PC disconnected" rather than a fresh "waiting", and shortens the idle auto-stop.
+        @Volatile var everConnected: Boolean = false
+            private set
     }
 
     private var stream: RtspServerStream? = null
@@ -104,8 +113,9 @@ class StreamService : Service(), ConnectChecker {
     private val idleCheck = object : Runnable {
         override fun run() {
             if (!isRunning) return
-            if (!clientConnected && SystemClock.elapsedRealtime() - lastClientMs > IDLE_TIMEOUT_MS) {
-                Log.i(TAG, "no PC for ${IDLE_TIMEOUT_MS / 60000} min — auto-stopping to save battery")
+            val timeout = if (everConnected) IDLE_AFTER_DISCONNECT_MS else IDLE_TIMEOUT_MS
+            if (!clientConnected && SystemClock.elapsedRealtime() - lastClientMs > timeout) {
+                Log.i(TAG, "no PC for ${timeout / 60000} min — auto-stopping to save battery")
                 stopStreaming()
                 return
             }
@@ -137,7 +147,7 @@ class StreamService : Service(), ConnectChecker {
 
     private fun startStreaming(mode: Mode, quality: Quality) {
         if (isRunning) return
-        clientConnected = false
+        clientConnected = false; everConnected = false
 
         // The RTSP server won't answer a client until the video encoder emits its first keyframe
         // (SPS/PPS via onVideoInfo), and a NoVideoSource never produces one. Camera modes use the real
@@ -163,7 +173,7 @@ class StreamService : Service(), ConnectChecker {
             // from here, the RTSP server's client listener.)
             s.getStreamClient().setClientListener(object : ClientListener {
                 override fun onClientConnected(client: ServerClient) {
-                    clientConnected = true; lastClientMs = SystemClock.elapsedRealtime()
+                    clientConnected = true; everConnected = true; lastClientMs = SystemClock.elapsedRealtime()
                     Log.i(TAG, "PC connected (clients=${s.getStreamClient().getNumClients()})")
                 }
                 override fun onClientDisconnected(client: ServerClient) {
@@ -257,7 +267,7 @@ class StreamService : Service(), ConnectChecker {
         stream = null
         isRunning = false
         streamUrl = null
-        clientConnected = false
+        clientConnected = false; everConnected = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
