@@ -9,8 +9,11 @@ import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.pedro.common.ConnectChecker
@@ -55,6 +58,12 @@ class StreamService : Service(), ConnectChecker {
         const val PORT = 8554
         const val I_FRAME_INTERVAL = 1   // 1s GOP: faster first frame + quicker recovery after a glitch
 
+        // Auto-stop after this long with no PC pulling — the encoder/camera run whether or not anyone
+        // is watching, so a stream left on with no viewer is pure battery waste. Generous enough not to
+        // interrupt the normal "start, then open Discord" flow.
+        private const val IDLE_TIMEOUT_MS = 5 * 60 * 1000L
+        private const val IDLE_CHECK_MS = 30 * 1000L
+
         // Mic-only still has to run the camera+video encoder (the RTSP server won't answer a client
         // until the video encoder emits a keyframe) — but that video is never sent, so encode a tiny,
         // low-fps frame to keep battery/heat down instead of a full 1080p30 stream nobody receives.
@@ -87,6 +96,22 @@ class StreamService : Service(), ConnectChecker {
 
     private var stream: RtspServerStream? = null
     private var wakeLock: PowerManager.WakeLock? = null
+
+    // Battery guard: auto-stop if no PC connects for IDLE_TIMEOUT_MS. lastClientMs = the last time a
+    // client was connected (or the stream start), so the timeout counts from "nobody watching".
+    @Volatile private var lastClientMs = 0L
+    private val idleHandler = Handler(Looper.getMainLooper())
+    private val idleCheck = object : Runnable {
+        override fun run() {
+            if (!isRunning) return
+            if (!clientConnected && SystemClock.elapsedRealtime() - lastClientMs > IDLE_TIMEOUT_MS) {
+                Log.i(TAG, "no PC for ${IDLE_TIMEOUT_MS / 60000} min — auto-stopping to save battery")
+                stopStreaming()
+                return
+            }
+            idleHandler.postDelayed(this, IDLE_CHECK_MS)
+        }
+    }
 
     // Headless streaming: no on-screen preview. RootEncoder's startPreview() attaches a second GL
     // surface to the encoder's shared context and, on at least some devices, releases/re-inits that
@@ -138,10 +163,12 @@ class StreamService : Service(), ConnectChecker {
             // from here, the RTSP server's client listener.)
             s.getStreamClient().setClientListener(object : ClientListener {
                 override fun onClientConnected(client: ServerClient) {
-                    clientConnected = true; Log.i(TAG, "PC connected (clients=${s.getStreamClient().getNumClients()})")
+                    clientConnected = true; lastClientMs = SystemClock.elapsedRealtime()
+                    Log.i(TAG, "PC connected (clients=${s.getStreamClient().getNumClients()})")
                 }
                 override fun onClientDisconnected(client: ServerClient) {
-                    clientConnected = false; Log.i(TAG, "PC disconnected")
+                    clientConnected = false; lastClientMs = SystemClock.elapsedRealtime()   // start the idle countdown
+                    Log.i(TAG, "PC disconnected")
                 }
                 override fun onClientNewBitrate(bitrate: Long, client: ServerClient) { /* adaptive hook */ }
             })
@@ -173,11 +200,14 @@ class StreamService : Service(), ConnectChecker {
             streamUrl = wifiRtspUrl() ?: s.getStreamClient().getEndPointConnection()
             isRunning = true
             acquireWakeLock()   // keep the CPU/stream alive with the screen off (less heat than forcing it on)
+            lastClientMs = SystemClock.elapsedRealtime()
+            idleHandler.postDelayed(idleCheck, IDLE_CHECK_MS)   // auto-stop if no PC ever connects
             Log.i(TAG, "RTSP server up ($mode, ${quality.label}) at $streamUrl")
             updateNotification()
         } catch (e: Exception) {
             // Never crash-loop the service (it is START_STICKY): stop cleanly on any start failure.
             Log.e(TAG, "startStreaming failed", e)
+            releaseWakeLock()   // don't leak the CPU lock if we bail after acquiring it
             runCatching { stream?.stopStream() }
             stream = null
             isRunning = false
@@ -221,6 +251,7 @@ class StreamService : Service(), ConnectChecker {
     }
 
     private fun stopStreaming() {
+        idleHandler.removeCallbacks(idleCheck)
         releaseWakeLock()
         stream?.let { if (it.isStreaming) it.stopStream() }
         stream = null

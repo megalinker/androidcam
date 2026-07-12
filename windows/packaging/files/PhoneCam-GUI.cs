@@ -81,7 +81,7 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.4.13";
+    const string Version = "0.4.14";
     const int LocalPort = 18554, PhonePort = 8554;
     bool usbForwarded = false, running = false;
     volatile bool videoSeen = false, audioSeen = false, reachIssue = false;   // from receiver stderr, drive the status
