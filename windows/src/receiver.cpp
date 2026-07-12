@@ -220,6 +220,7 @@ struct Options {
     bool flipH = false, flipV = false;   // mirror the webcam image
     std::string audioDevice;
     float micGainDb = 0.0f;   // boost the (quiet) phone mic; soft-limited in the sink
+    std::string eqPreset;     // voice EQ: preset name or a "type:freq:q:gain;..." band list
 };
 
 static Options parse_args(int argc, char** argv) {
@@ -234,6 +235,7 @@ static Options parse_args(int argc, char** argv) {
         else if (a == "--flip-v") o.flipV = true;
         else if (a == "--audio-device" && i + 1 < argc) o.audioDevice = argv[++i];
         else if (a == "--mic-gain" && i + 1 < argc) o.micGainDb = (float)atof(argv[++i]);
+        else if (a == "--eq" && i + 1 < argc) o.eqPreset = argv[++i];
         else if (a.rfind("--", 0) == 0) fprintf(stderr, "ignoring unknown option: %s\n", a.c_str());
         else o.url = argv[i];
     }
@@ -288,7 +290,7 @@ static int run_session(const Options& opt, PreviewWindow* preview) {
     WasapiSink sink;
     bool audioReady = false;
     if (adec && !opt.noAudio) {
-        audioReady = sink.Init(adec, opt.audioDevice, opt.micGainDb);
+        audioReady = sink.Init(adec, opt.audioDevice, opt.micGainDb, opt.eqPreset);
         if (!audioReady) fprintf(stderr, "[audio] sink init failed; continuing without audio\n");
     }
 
@@ -339,7 +341,8 @@ int main(int argc, char** argv) {
     if (!opt.url) {
         fprintf(stderr,
             "usage: %s rtsp://<phone-ip>:8554/ [--preview] [--no-audio] "
-            "[--audio-device <name-substr>] [--mic-gain <db>] [--udp] [--smooth] [--flip-h] [--flip-v]\n", argv[0]);
+            "[--audio-device <name-substr>] [--mic-gain <db>] [--eq <preset|type:f:q:db;...>] "
+            "[--udp] [--smooth] [--flip-h] [--flip-v]\n", argv[0]);
         return 1;
     }
     signal(SIGINT, on_sigint);

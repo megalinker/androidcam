@@ -9,7 +9,9 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <algorithm>
+#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -59,6 +61,91 @@ inline float softLimit(float x) {
     return sign * (t + (1.0f - t) * (1.0f - std::exp(-(a - t) / (1.0f - t))));
 }
 
+// One RBJ-cookbook biquad. Per-channel state (up to 8 endpoint channels), Direct-Form-II Transposed.
+// An EQ is just a std::vector of these — any number of bands the user wants.
+struct Biquad {
+    float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+    float z1[8] = {0}, z2[8] = {0};
+    inline float process(float x, int ch) {
+        float y = b0 * x + z1[ch];
+        z1[ch] = b1 * x - a1 * y + z2[ch];
+        z2[ch] = b2 * x - a2 * y;
+        return y;
+    }
+    void set(float B0, float B1, float B2, float A0, float A1, float A2) {
+        b0 = B0 / A0; b1 = B1 / A0; b2 = B2 / A0; a1 = A1 / A0; a2 = A2 / A0;
+    }
+    void peak(float f, float Q, float dB, float Fs) {
+        float w = 6.2831853f * f / Fs, c = std::cos(w), al = std::sin(w) / (2 * Q), A = std::pow(10.f, dB / 40);
+        set(1 + al * A, -2 * c, 1 - al * A, 1 + al / A, -2 * c, 1 - al / A);
+    }
+    void highpass(float f, float Q, float Fs) {
+        float w = 6.2831853f * f / Fs, c = std::cos(w), al = std::sin(w) / (2 * Q);
+        set((1 + c) / 2, -(1 + c), (1 + c) / 2, 1 + al, -2 * c, 1 - al);
+    }
+    void lowpass(float f, float Q, float Fs) {
+        float w = 6.2831853f * f / Fs, c = std::cos(w), al = std::sin(w) / (2 * Q);
+        set((1 - c) / 2, 1 - c, (1 - c) / 2, 1 + al, -2 * c, 1 - al);
+    }
+    void lowshelf(float f, float Q, float dB, float Fs) {
+        float w = 6.2831853f * f / Fs, c = std::cos(w), A = std::pow(10.f, dB / 40), sa = 2 * std::sqrt(A) * (std::sin(w) / (2 * Q));
+        set(A * ((A + 1) - (A - 1) * c + sa), 2 * A * ((A - 1) - (A + 1) * c), A * ((A + 1) - (A - 1) * c - sa),
+            (A + 1) + (A - 1) * c + sa, -2 * ((A - 1) + (A + 1) * c), (A + 1) + (A - 1) * c - sa);
+    }
+    void highshelf(float f, float Q, float dB, float Fs) {
+        float w = 6.2831853f * f / Fs, c = std::cos(w), A = std::pow(10.f, dB / 40), sa = 2 * std::sqrt(A) * (std::sin(w) / (2 * Q));
+        set(A * ((A + 1) + (A - 1) * c + sa), -2 * A * ((A - 1) + (A + 1) * c), A * ((A + 1) + (A - 1) * c - sa),
+            (A + 1) - (A - 1) * c + sa, 2 * ((A - 1) - (A + 1) * c), (A + 1) - (A - 1) * c - sa);
+    }
+};
+
+// Named presets expand to a band list; anything else is treated as a band list already.
+std::string expandEqPreset(const std::string& name) {
+    std::string p = lower(name);
+    if (p == "clarity") return "hp:80:0.7:0;peak:300:1:-2.5;peak:3500:1:3";
+    if (p == "warm")    return "hp:70:0.7:0;ls:200:0.7:3;peak:3000:1:1.5;hs:9000:0.7:-2";
+    if (p == "bright")  return "hp:80:0.7:0;peak:4000:1.2:4;hs:10000:0.7:3";
+    if (p == "podcast") return "hp:80:0.7:0;peak:250:1:-2;peak:3000:1:2.5;hs:9000:0.7:1.5";
+    return name;
+}
+
+// Parse "type:freq:q:gain;type:freq:q:gain;..." (any number of bands) into a biquad cascade.
+// types: peak, hp (high-pass), lp (low-pass), ls (low-shelf), hs (high-shelf).
+std::vector<Biquad> buildEq(const std::string& specIn, float Fs) {
+    std::vector<Biquad> bands;
+    std::string spec = expandEqPreset(specIn);
+    if (spec.empty() || lower(spec) == "off") return bands;
+    size_t pos = 0;
+    while (pos < spec.size()) {
+        size_t semi = spec.find(';', pos);
+        std::string tok = spec.substr(pos, semi == std::string::npos ? spec.size() - pos : semi - pos);
+        pos = (semi == std::string::npos) ? spec.size() : semi + 1;
+        std::string part[4]; int np = 0; size_t p2 = 0;
+        while (np < 4) {
+            size_t colon = tok.find(':', p2);
+            part[np++] = tok.substr(p2, colon == std::string::npos ? tok.size() - p2 : colon - p2);
+            if (colon == std::string::npos) break;
+            p2 = colon + 1;
+        }
+        if (np < 1 || part[0].empty()) continue;
+        std::string type = lower(part[0]);
+        float freq = np > 1 ? (float)atof(part[1].c_str()) : 1000.f;
+        float q    = np > 2 ? (float)atof(part[2].c_str()) : 0.707f;
+        float gain = np > 3 ? (float)atof(part[3].c_str()) : 0.f;
+        if (q <= 0.f) q = 0.707f;
+        if (freq <= 0.f || freq >= Fs / 2) continue;
+        Biquad b;
+        if (type == "peak") b.peak(freq, q, gain, Fs);
+        else if (type == "hp") b.highpass(freq, q, Fs);
+        else if (type == "lp") b.lowpass(freq, q, Fs);
+        else if (type == "ls") b.lowshelf(freq, q, gain, Fs);
+        else if (type == "hs") b.highshelf(freq, q, gain, Fs);
+        else continue;
+        bands.push_back(b);
+    }
+    return bands;
+}
+
 } // namespace
 
 struct WasapiSink::Impl {
@@ -81,12 +168,13 @@ struct WasapiSink::Impl {
     int bufSamples = 0;
     bool started = false;
     float gainLinear = 1.0f;   // mic boost (linear), applied with a soft limiter before render
+    std::vector<Biquad> eq;    // voice EQ cascade (any number of bands), applied before the gain
 };
 
 WasapiSink::WasapiSink() : p_(new Impl) {}
 WasapiSink::~WasapiSink() { Stop(); delete p_; p_ = nullptr; }
 
-bool WasapiSink::Init(const AVCodecContext* dec, const std::string& deviceMatch, float gainDb) {
+bool WasapiSink::Init(const AVCodecContext* dec, const std::string& deviceMatch, float gainDb, const std::string& eqPreset) {
     Impl& s = *p_;
     s.gainLinear = std::pow(10.0f, gainDb / 20.0f);
 
@@ -152,6 +240,7 @@ bool WasapiSink::Init(const AVCodecContext* dec, const std::string& deviceMatch,
     s.outChannels = s.mix->nChannels;
     s.blockAlign = s.mix->nBlockAlign;
     av_channel_layout_default(&s.outLayout, s.outChannels);
+    s.eq = buildEq(eqPreset, (float)s.outRate);   // voice EQ cascade (empty = off)
 
     // 200 ms shared-mode buffer.
     const REFERENCE_TIME kBufDuration = 2000000; // 100-ns units
@@ -174,8 +263,9 @@ bool WasapiSink::Init(const AVCodecContext* dec, const std::string& deviceMatch,
     hr = s.client->Start();
     if (FAILED(hr)) return false;
     s.started = true;
-    fprintf(stderr, "[audio] rendering: %d Hz, %d ch, %s (boost %.1f dB)\n",
-            s.outRate, s.outChannels, av_get_sample_fmt_name(s.outFmt), 20.0f * std::log10(s.gainLinear));
+    fprintf(stderr, "[audio] rendering: %d Hz, %d ch, %s (boost %.1f dB, eq %d bands)\n",
+            s.outRate, s.outChannels, av_get_sample_fmt_name(s.outFmt),
+            20.0f * std::log10(s.gainLinear), (int)s.eq.size());
     return true;
 }
 
@@ -197,23 +287,29 @@ bool WasapiSink::WriteFrame(const AVFrame* frame) {
                           (const uint8_t* const*)frame->extended_data, frame->nb_samples);
     if (got < 0) return false;
 
-    // Mic boost: gain then soft-limit, in whatever interleaved sample format the endpoint wants.
-    if (s.gainLinear != 1.0f && got > 0) {
-        int n = got * s.outChannels;
+    // Voice EQ (per-channel biquad cascade) -> mic boost -> soft limit, in the endpoint's sample format.
+    if ((s.gainLinear != 1.0f || !s.eq.empty()) && got > 0 && s.outChannels <= 8) {
+        int n = got * s.outChannels, nch = s.outChannels;
         if (s.outFmt == AV_SAMPLE_FMT_FLT) {
             float* f = reinterpret_cast<float*>(s.buf);
-            for (int i = 0; i < n; ++i) f[i] = softLimit(f[i] * s.gainLinear);
+            for (int i = 0; i < n; ++i) {
+                float x = f[i]; int ch = i % nch;
+                for (auto& b : s.eq) x = b.process(x, ch);
+                f[i] = softLimit(x * s.gainLinear);
+            }
         } else if (s.outFmt == AV_SAMPLE_FMT_S16) {
             int16_t* q = reinterpret_cast<int16_t*>(s.buf);
             for (int i = 0; i < n; ++i) {
-                float v = softLimit((q[i] / 32768.0f) * s.gainLinear);
-                q[i] = (int16_t)std::lrint(v * 32767.0f);
+                float x = q[i] / 32768.0f; int ch = i % nch;
+                for (auto& b : s.eq) x = b.process(x, ch);
+                q[i] = (int16_t)std::lrint(softLimit(x * s.gainLinear) * 32767.0f);
             }
         } else if (s.outFmt == AV_SAMPLE_FMT_S32) {
             int32_t* q = reinterpret_cast<int32_t*>(s.buf);
             for (int i = 0; i < n; ++i) {
-                float v = softLimit((float)(q[i] / 2147483648.0) * s.gainLinear);
-                q[i] = (int32_t)std::llrint((double)v * 2147483647.0);
+                float x = (float)(q[i] / 2147483648.0); int ch = i % nch;
+                for (auto& b : s.eq) x = b.process(x, ch);
+                q[i] = (int32_t)std::llrint((double)softLimit(x * s.gainLinear) * 2147483647.0);
             }
         }
     }

@@ -30,7 +30,10 @@ public:
     // `dec` supplies the source audio format (rate / channel layout / sample format).
     // gainDb boosts the (typically quiet) phone-mic level; a soft limiter after the gain
     // keeps peaks from clipping. 0 dB = passthrough.
-    bool Init(const AVCodecContext* dec, const std::string& deviceMatch, float gainDb = 0.0f);
+    // eqPreset selects a voice EQ curve ("clarity" / "warm" / "bright" / "podcast"); "" or
+    // "off" = no EQ. Applied per-channel before the gain/limiter.
+    bool Init(const AVCodecContext* dec, const std::string& deviceMatch,
+              float gainDb = 0.0f, const std::string& eqPreset = "");
 
     // Resample `frame` to the endpoint mix format and render it. Returns false on a fatal error.
     bool WriteFrame(const AVFrame* frame);

@@ -68,8 +68,13 @@ public class PhoneCamGui : Form
     LinkLabel linkIp, linkDiag;
     TextBox tbIp;
     CheckBox cbMic, cbFlipH, cbFlipV, cbUdp;
-    ComboBox cbBoost;
+    ComboBox cbBoost, cbEq;
+    string customEq = "";        // user-defined band list ("type:f:q:db;...") from the EQ editor
+    int prevEqIndex = 0;         // revert target if the custom editor is cancelled
+    bool suppressEqDialog = false;   // don't pop the editor when we set the EQ index programmatically
     static readonly int[] BoostDb = { 0, 6, 12, 18 };   // Off / Low / Med / High
+    // EQ dropdown index -> receiver preset name; index 5 ("custom") uses customEq instead.
+    static readonly string[] EqPreset = { "", "clarity", "warm", "bright", "podcast", "custom" };
     Button btnStart;
     Label lblStatus, lblDot, tip;
     Panel preview;
@@ -81,7 +86,7 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.4.14";
+    const string Version = "0.4.15";
     const int LocalPort = 18554, PhonePort = 8554;
     bool usbForwarded = false, running = false;
     volatile bool videoSeen = false, audioSeen = false, reachIssue = false;   // from receiver stderr, drive the status
@@ -122,7 +127,7 @@ public class PhoneCamGui : Form
         Text = "PhoneCam v" + Version;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(744, 524);
+        ClientSize = new Size(744, 552);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Bg; ForeColor = Fg;
         Font = new Font("Segoe UI", 9.5f);
@@ -148,31 +153,35 @@ public class PhoneCamGui : Form
         cbBoost = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(150, 219), Width = 96, FlatStyle = FlatStyle.Flat, BackColor = Card, ForeColor = Fg };
         cbBoost.Items.AddRange(new object[] { "Boost: Off", "Boost: Low", "Boost: Med", "Boost: High" });
         cbBoost.SelectedIndex = 2;   // Medium (~+12 dB) by default — phone mics are quiet
-        cbMic.CheckedChanged += (s, e) => cbBoost.Enabled = cbMic.Checked;
-        cbBoost.Enabled = cbMic.Checked;
-        cbFlipH = Check("Flip left / right", 22, 248);
-        cbFlipV = Check("Flip up / down", 22, 274);
-        cbUdp = Check("Lower latency (Wi-Fi) — may glitch", 22, 300);
-        Controls.Add(cbMic); Controls.Add(cbBoost); Controls.Add(cbFlipH); Controls.Add(cbFlipV); Controls.Add(cbUdp);
+        cbEq = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(150, 247), Width = 96, FlatStyle = FlatStyle.Flat, BackColor = Card, ForeColor = Fg };
+        cbEq.Items.AddRange(new object[] { "EQ: Off", "EQ: Clarity", "EQ: Warm", "EQ: Bright", "EQ: Podcast", "EQ: Custom…" });
+        cbEq.SelectedIndex = 0;
+        cbEq.SelectedIndexChanged += OnEqChanged;
+        cbMic.CheckedChanged += (s, e) => { cbBoost.Enabled = cbMic.Checked; cbEq.Enabled = cbMic.Checked; };
+        cbBoost.Enabled = cbMic.Checked; cbEq.Enabled = cbMic.Checked;
+        cbFlipH = Check("Flip left / right", 22, 278);
+        cbFlipV = Check("Flip up / down", 22, 304);
+        cbUdp = Check("Lower latency (Wi-Fi) — may glitch", 22, 330);
+        Controls.Add(cbMic); Controls.Add(cbBoost); Controls.Add(cbEq); Controls.Add(cbFlipH); Controls.Add(cbFlipV); Controls.Add(cbUdp);
 
-        btnStart = new Button { Text = "Start", Location = new Point(22, 340), Size = new Size(224, 40), FlatStyle = FlatStyle.Flat, BackColor = Accent, ForeColor = Color.White, Font = new Font("Segoe UI Semibold", 11f) };
+        btnStart = new Button { Text = "Start", Location = new Point(22, 368), Size = new Size(224, 40), FlatStyle = FlatStyle.Flat, BackColor = Accent, ForeColor = Color.White, Font = new Font("Segoe UI Semibold", 11f) };
         btnStart.FlatAppearance.BorderSize = 0;
         btnStart.Click += OnStartStop;
         Controls.Add(btnStart);
 
-        lblDot = new Label { Text = "●", ForeColor = Sub, Location = new Point(24, 394), AutoSize = true, Font = new Font("Segoe UI", 11f) };
-        lblStatus = new Label { Text = "Idle", ForeColor = Sub, Location = new Point(44, 396), AutoSize = true, MaximumSize = new Size(220, 0) };
+        lblDot = new Label { Text = "●", ForeColor = Sub, Location = new Point(24, 422), AutoSize = true, Font = new Font("Segoe UI", 11f) };
+        lblStatus = new Label { Text = "Idle", ForeColor = Sub, Location = new Point(44, 424), AutoSize = true, MaximumSize = new Size(220, 0) };
         Controls.Add(lblDot); Controls.Add(lblStatus);
 
-        tip = new Label { Text = TipText(false), ForeColor = Sub, Location = new Point(22, 446), AutoSize = true };
+        tip = new Label { Text = TipText(false), ForeColor = Sub, Location = new Point(22, 474), AutoSize = true };
         Controls.Add(tip);
 
-        linkDiag = new LinkLabel { Text = "Copy diagnostics", Location = new Point(22, 494), AutoSize = true, LinkColor = Accent, ActiveLinkColor = Accent, LinkBehavior = LinkBehavior.AlwaysUnderline, Font = new Font("Segoe UI", 9f) };
+        linkDiag = new LinkLabel { Text = "Copy diagnostics", Location = new Point(22, 522), AutoSize = true, LinkColor = Accent, ActiveLinkColor = Accent, LinkBehavior = LinkBehavior.AlwaysUnderline, Font = new Font("Segoe UI", 9f) };
         linkDiag.LinkClicked += (s, e) => CopyDiagnostics();
         Controls.Add(linkDiag);
 
         // Right: embedded live preview (also hosts the pairing QR before a phone connects)
-        preview = new Panel { Location = new Point(260, 84), Size = new Size(468, 416), BackColor = Color.FromArgb(12, 13, 15), BorderStyle = BorderStyle.None };
+        preview = new Panel { Location = new Point(260, 84), Size = new Size(468, 444), BackColor = Color.FromArgb(12, 13, 15), BorderStyle = BorderStyle.None };
         preview.Paint += (s, e) => { using (var pen = new Pen(Line)) e.Graphics.DrawRectangle(pen, 0, 0, preview.Width - 1, preview.Height - 1); };
         previewHint = new Label { Text = "Live preview appears here once you press Start.", ForeColor = Sub, BackColor = Color.FromArgb(12, 13, 15), AutoSize = true, Location = new Point(16, 16) };
         // Centered as one vertical group inside the 468×392 preview panel: the QR block itself
@@ -213,6 +222,7 @@ public class PhoneCamGui : Form
         tbIp.Enabled = on && rbWifi.Checked;
         cbMic.Enabled = on; cbFlipH.Enabled = on; cbFlipV.Enabled = on; cbUdp.Enabled = on;
         cbBoost.Enabled = on && cbMic.Checked;
+        cbEq.Enabled = on && cbMic.Checked;
     }
 
     string Adb(string args)
@@ -299,6 +309,29 @@ public class PhoneCamGui : Form
 
     void OnStartStop(object sender, EventArgs e) { if (running) StopReceiver(); else StartReceiver(); }
 
+    // "EQ: Custom…" opens the band editor; presets just select. On cancel, revert to the last choice.
+    void OnEqChanged(object sender, EventArgs e)
+    {
+        if (suppressEqDialog) return;
+        if (cbEq.SelectedIndex == 5)
+        {
+            using (var dlg = new EqEditorForm(customEq))
+            {
+                if (dlg.ShowDialog(this) == DialogResult.OK) { customEq = dlg.Result; prevEqIndex = 5; }
+                else { suppressEqDialog = true; cbEq.SelectedIndex = prevEqIndex; suppressEqDialog = false; }
+            }
+        }
+        else prevEqIndex = cbEq.SelectedIndex;
+    }
+
+    /// <summary>The --eq value for the current selection: a preset name, or the custom band list.</summary>
+    string SelectedEq()
+    {
+        int i = cbEq.SelectedIndex;
+        if (i <= 0 || i >= EqPreset.Length) return "";
+        return EqPreset[i] == "custom" ? customEq : EqPreset[i];
+    }
+
     void StartReceiver()
     {
         bool useMic = cbMic.Checked;
@@ -353,6 +386,8 @@ public class PhoneCamGui : Form
             a.Add("--audio-device"); a.Add("CABLE Input");
             int bi = cbBoost.SelectedIndex; if (bi < 0 || bi >= BoostDb.Length) bi = 2;
             if (BoostDb[bi] != 0) { a.Add("--mic-gain"); a.Add(BoostDb[bi].ToString()); }
+            string eq = SelectedEq();
+            if (eq.Length > 0) { a.Add("--eq"); a.Add(eq); }
         }
         else a.Add("--no-audio");
 
@@ -588,6 +623,8 @@ public class PhoneCamGui : Form
                     case "flipV": cbFlipV.Checked = kv[1] == "1"; break;
                     case "udp": cbUdp.Checked = kv[1] == "1"; break;
                     case "boost": { int bi; if (int.TryParse(kv[1], out bi) && bi >= 0 && bi < BoostDb.Length) cbBoost.SelectedIndex = bi; } break;
+                    case "eqcustom": customEq = kv[1]; break;
+                    case "eq": { int ei; if (int.TryParse(kv[1], out ei) && ei >= 0 && ei < cbEq.Items.Count) { suppressEqDialog = true; cbEq.SelectedIndex = ei; suppressEqDialog = false; prevEqIndex = ei; } } break;
                 }
             }
         } catch { }
@@ -606,6 +643,8 @@ public class PhoneCamGui : Form
                 "flipV=" + (cbFlipV.Checked ? "1" : "0"),
                 "udp=" + (cbUdp.Checked ? "1" : "0"),
                 "boost=" + cbBoost.SelectedIndex,
+                "eqcustom=" + customEq,
+                "eq=" + cbEq.SelectedIndex,
             });
         } catch { }
     }
@@ -616,5 +655,117 @@ public class PhoneCamGui : Form
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.Run(new PhoneCamGui());
+    }
+}
+
+// Custom EQ editor — an unlimited list of bands. Serializes to the receiver's "type:f:q:db;..." spec.
+public class EqEditorForm : Form
+{
+    static readonly Color Bg = Color.FromArgb(27, 29, 33);
+    static readonly Color Card = Color.FromArgb(42, 45, 51);
+    static readonly Color Line = Color.FromArgb(60, 64, 72);
+    static readonly Color Fg = Color.FromArgb(234, 236, 239);
+    static readonly Color Accent = Color.FromArgb(72, 125, 232);
+    static readonly string[] TypeNames = { "Peak", "High-pass", "Low-pass", "Low-shelf", "High-shelf" };
+    static readonly string[] TypeCodes = { "peak", "hp", "lp", "ls", "hs" };
+
+    readonly DataGridView grid;
+    public string Result { get; private set; }
+
+    public EqEditorForm(string bandList)
+    {
+        Result = "";
+        Text = "Custom EQ";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false; MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterParent;
+        ClientSize = new Size(470, 328);
+        BackColor = Bg; ForeColor = Fg;
+        Font = new Font("Segoe UI", 9.5f);
+
+        Controls.Add(new Label { Text = "Add as many bands as you like. Gain is ignored for high/low-pass.", ForeColor = Color.FromArgb(138, 143, 150), Location = new Point(16, 12), AutoSize = true });
+
+        grid = new DataGridView
+        {
+            Location = new Point(16, 38), Size = new Size(438, 216),
+            BackgroundColor = Card, ForeColor = Fg, BorderStyle = BorderStyle.FixedSingle,
+            GridColor = Line, RowHeadersVisible = false, AllowUserToAddRows = false,
+            AllowUserToResizeRows = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+            AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, EnableHeadersVisualStyles = false
+        };
+        grid.ColumnHeadersDefaultCellStyle.BackColor = Card;
+        grid.ColumnHeadersDefaultCellStyle.ForeColor = Fg;
+        grid.DefaultCellStyle.BackColor = Card;
+        grid.DefaultCellStyle.ForeColor = Fg;
+        grid.DefaultCellStyle.SelectionBackColor = Accent;
+        grid.DefaultCellStyle.SelectionForeColor = Color.White;
+        grid.DataError += (s, e) => { e.ThrowException = false; };
+        var typeCol = new DataGridViewComboBoxColumn { HeaderText = "Type", Name = "type", FlatStyle = FlatStyle.Flat, Width = 108 };
+        typeCol.Items.AddRange(TypeNames);
+        grid.Columns.Add(typeCol);
+        grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Freq (Hz)", Name = "freq" });
+        grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Q", Name = "q" });
+        grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Gain (dB)", Name = "gain" });
+        Controls.Add(grid);
+
+        var add = Btn("Add band", 16, 266, 92, Card);
+        add.Click += (s, e) => grid.Rows.Add("Peak", "1000", "1.0", "0");
+        var rem = Btn("Remove", 116, 266, 84, Card);
+        rem.Click += (s, e) => { if (grid.CurrentRow != null) grid.Rows.Remove(grid.CurrentRow); };
+        var ok = Btn("OK", 278, 266, 84, Accent); ok.ForeColor = Color.White; ok.FlatAppearance.BorderSize = 0; ok.DialogResult = DialogResult.OK;
+        var cancel = Btn("Cancel", 370, 266, 84, Card); cancel.DialogResult = DialogResult.Cancel;
+        Controls.Add(add); Controls.Add(rem); Controls.Add(ok); Controls.Add(cancel);
+        AcceptButton = ok; CancelButton = cancel;
+
+        LoadBands(bandList);
+        FormClosing += (s, e) => { if (DialogResult == DialogResult.OK) Result = Serialize(); };
+    }
+
+    static Button Btn(string t, int x, int y, int w, Color bg)
+    {
+        var b = new Button { Text = t, Location = new Point(x, y), Size = new Size(w, 30), FlatStyle = FlatStyle.Flat, BackColor = bg, ForeColor = Fg };
+        b.FlatAppearance.BorderColor = Line;
+        return b;
+    }
+
+    void LoadBands(string spec)
+    {
+        if (string.IsNullOrEmpty(spec) || spec.Trim().Length == 0)
+        {
+            grid.Rows.Add("High-pass", "80", "0.7", "0");
+            grid.Rows.Add("Peak", "300", "1.0", "-2.5");
+            grid.Rows.Add("Peak", "3500", "1.0", "3");
+            return;
+        }
+        foreach (var band in spec.Split(';'))
+        {
+            var p = band.Split(':');
+            if (p.Length < 1 || p[0].Trim().Length == 0) continue;
+            int ti = Array.IndexOf(TypeCodes, p[0].Trim().ToLowerInvariant());
+            grid.Rows.Add(ti >= 0 ? TypeNames[ti] : "Peak",
+                          p.Length > 1 ? p[1] : "1000", p.Length > 2 ? p[2] : "1.0", p.Length > 3 ? p[3] : "0");
+        }
+    }
+
+    string Serialize()
+    {
+        var sb = new StringBuilder();
+        foreach (DataGridViewRow r in grid.Rows)
+        {
+            var tv = r.Cells["type"].Value;
+            int ti = Array.IndexOf(TypeNames, tv != null ? tv.ToString() : "Peak"); if (ti < 0) ti = 0;
+            string f = Cell(r, "freq", "1000"), q = Cell(r, "q", "1.0"), g = Cell(r, "gain", "0");
+            if (f.Length == 0) continue;
+            if (sb.Length > 0) sb.Append(';');
+            sb.Append(TypeCodes[ti]).Append(':').Append(f).Append(':').Append(q).Append(':').Append(g);
+        }
+        return sb.ToString();
+    }
+
+    static string Cell(DataGridViewRow r, string name, string dflt)
+    {
+        var v = r.Cells[name].Value;
+        string s = v != null ? v.ToString().Trim() : "";
+        return s.Length == 0 ? dflt : s;
     }
 }
