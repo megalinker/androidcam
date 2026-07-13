@@ -78,7 +78,7 @@ public class PhoneCamGui : Form
     Button btnStart;
     Label lblStatus, lblDot, tip, micLabel;
     Panel preview, micMeter;
-    Label previewHint, qrLabel;
+    Label previewHint, qrLabel, srtHint;
     PictureBox qrBox;
     volatile float micLevel = 0f;   // 0..1 peak from the receiver's [level] lines, drives the mic meter
     bool authIssue = false;         // receiver reported an auth (401) failure
@@ -91,13 +91,14 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.4.22";
+    const string Version = "0.4.23";
     const string RtspUser = "phonecam";   // Basic-auth username the phone expects
     const int LocalPort = 18554, PhonePort = 8554;
     const int PhoneControlPort = 8555, LocalControlPort = 18555;   // "stop the phone now" channel (USB uses the forward)
     const int SrtPort = 8890;    // UDP port the PC's SRT listener binds in encrypted mode
     bool srtMode = false;        // this session is an encrypted SRT listen (phone pushes to us)
     string srtPass = "";         // the SRT passphrase for this session (kept out of logs)
+    DateTime srtWaitSince = DateTime.MinValue;   // when the encrypted QR went up (to time the VPN hint)
     bool usbForwarded = false, running = false;
     volatile bool videoSeen = false, audioSeen = false, reachIssue = false;   // from receiver stderr, drive the status
 
@@ -232,9 +233,13 @@ public class PhoneCamGui : Form
         // sits at the panel's vertical centre, with the caption just above it.
         qrLabel = new Label { Text = "Scan this with the PhoneCam phone app\n(tap “Scan PC QR to connect”)", ForeColor = Fg, BackColor = Color.FromArgb(12, 13, 15), Size = new Size(468, 40), Location = new Point(0, 34), TextAlign = ContentAlignment.MiddleCenter, Visible = false };
         qrBox = new PictureBox { Location = new Point(104, 82), Size = new Size(260, 260), SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.White, Visible = false };
+        // Shown below the QR only if an encrypted connection stalls — the #1 cause is a VPN hiding the LAN.
+        srtHint = new Label { Text = "Nothing yet? If you use a VPN, turn on “Allow LAN traffic” in it on\nBOTH this PC and the phone — a full tunnel hides local devices.",
+            ForeColor = Amber, BackColor = Color.FromArgb(12, 13, 15), Size = new Size(468, 46), Location = new Point(0, 356),
+            TextAlign = ContentAlignment.MiddleCenter, Font = new Font("Segoe UI", 8.5f), Visible = false };
         // Saved-devices list — fills the empty preview panel while idle so you can reconnect without a QR.
         devicesPanel = new Panel { Location = new Point(0, 0), Size = preview.ClientSize, BackColor = Color.FromArgb(12, 13, 15), Visible = false };
-        preview.Controls.Add(previewHint); preview.Controls.Add(qrLabel); preview.Controls.Add(qrBox); preview.Controls.Add(devicesPanel);
+        preview.Controls.Add(previewHint); preview.Controls.Add(qrLabel); preview.Controls.Add(qrBox); preview.Controls.Add(srtHint); preview.Controls.Add(devicesPanel);
         Controls.Add(preview);
 
         if (receiverExe == null) { btnStart.Enabled = false; SetStatus(Color.IndianRed, "receiver.exe not found"); }
@@ -589,6 +594,7 @@ public class PhoneCamGui : Form
         catch (Exception ex) { MessageBox.Show("Couldn't render the QR: " + ex.Message, "PhoneCam"); srtMode = false; return; }
         qrLabel.Text = "Scan this with the PhoneCam app\n(encrypted 🔒)";
         qrLabel.Visible = true; qrBox.Visible = true;
+        srtWaitSince = DateTime.Now; srtHint.Visible = false;
         SetStatus(Amber, "Scan the QR (encrypted) with the PhoneCam app…");
         StartReceiverWithUrl(listenUrl, useMic);   // launches the listener + sets running/Stop/timer
     }
@@ -794,6 +800,9 @@ public class PhoneCamGui : Form
         // Phone connected → drop the pairing QR (SRT has no OnPaired step to do it).
         if ((hasVideo || audioSeen) && qrBox.Visible)
         { qrLabel.Visible = false; qrBox.Visible = false; if (qrBox.Image != null) { var i = qrBox.Image; qrBox.Image = null; i.Dispose(); } }
+        // Encrypted connection stalling? Surface the VPN "allow LAN" hint (the usual culprit).
+        bool srtStalled = srtMode && !hasVideo && !audioSeen && (DateTime.Now - srtWaitSince).TotalSeconds > 12;
+        if (srtHint.Visible != srtStalled) srtHint.Visible = srtStalled;
         bool micActive = running && audioSeen;
         if (micMeter.Visible != micActive) { micMeter.Visible = micActive; micLabel.Visible = micActive; }
         if (hasVideo) SetStatus(Green, "Live — select “PhoneCam Camera” in your app");
@@ -887,6 +896,7 @@ public class PhoneCamGui : Form
         if (IsHandleCreated)
         {
             if (qrBox != null) { qrLabel.Visible = false; qrBox.Visible = false; if (qrBox.Image != null) { var i = qrBox.Image; qrBox.Image = null; i.Dispose(); } }
+            if (srtHint != null) srtHint.Visible = false;
             SetInputsEnabled(true);
             tip.Text = TipText(false);
             btnStart.Text = "Start"; btnStart.BackColor = Accent;
