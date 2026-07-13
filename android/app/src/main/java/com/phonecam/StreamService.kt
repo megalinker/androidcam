@@ -24,7 +24,9 @@ import com.pedro.encoder.input.sources.audio.NoAudioSource
 import com.pedro.encoder.input.sources.video.BitmapSource
 import com.pedro.encoder.input.sources.video.Camera2Source
 import com.pedro.encoder.input.sources.video.VideoSource
+import com.pedro.library.srt.SrtStream
 import com.pedro.rtspserver.RtspServerStream
+import com.pedro.srt.srt.packets.control.handshake.EncryptionType
 import com.pedro.rtspserver.server.ClientListener
 import com.pedro.rtspserver.server.ServerClient
 
@@ -55,6 +57,12 @@ class StreamService : Service(), ConnectChecker {
         const val ACTION_SWITCH_CAMERA = "com.phonecam.action.SWITCH_CAMERA"
         const val EXTRA_MODE = "mode"
         const val EXTRA_QUALITY = "quality"
+        // Encrypted transport: "rtsp" (default, phone = server) or "srt" (phone pushes AES-encrypted to the PC).
+        const val EXTRA_TRANSPORT = "transport"
+        const val EXTRA_SRT_HOST = "srtHost"
+        const val EXTRA_SRT_PORT = "srtPort"
+        const val EXTRA_SRT_PASS = "srtPass"
+        const val SRT_LATENCY_MS = 120   // SRT receive buffer; recovers loss, keeps latency low on a LAN
 
         const val PORT = 8554
         // A tiny control port: the PC connects and sends "PCAM-STOP" so pressing Stop on the PC stops
@@ -126,6 +134,8 @@ class StreamService : Service(), ConnectChecker {
     }
 
     private var stream: RtspServerStream? = null
+    private var srtStream: SrtStream? = null
+    @Volatile private var isSrt = false   // current transport, so the ConnectChecker callbacks know what they mean
     private var wakeLock: PowerManager.WakeLock? = null
     private var controlServer: java.net.ServerSocket? = null
 
@@ -162,15 +172,21 @@ class StreamService : Service(), ConnectChecker {
             ?: Mode.BOTH
         val quality = intent?.getStringExtra(EXTRA_QUALITY)?.let { runCatching { Quality.valueOf(it) }.getOrNull() }
             ?: DEFAULT_QUALITY
+        val transport = intent?.getStringExtra(EXTRA_TRANSPORT) ?: "rtsp"
+        val srtHost = intent?.getStringExtra(EXTRA_SRT_HOST)
+        val srtPort = intent?.getIntExtra(EXTRA_SRT_PORT, 0) ?: 0
+        val srtPass = intent?.getStringExtra(EXTRA_SRT_PASS)
 
         startForegroundForMode(mode)
-        startStreaming(mode, quality)
+        startStreaming(mode, quality, transport, srtHost, srtPort, srtPass)
         return START_STICKY
     }
 
-    private fun startStreaming(mode: Mode, quality: Quality) {
+    private fun startStreaming(mode: Mode, quality: Quality, transport: String,
+                               srtHost: String?, srtPort: Int, srtPass: String?) {
         if (isRunning) return
         clientConnected = false; everConnected = false
+        isSrt = transport == "srt"
 
         // The RTSP server won't answer a client until the video encoder emits its first keyframe
         // (SPS/PPS via onVideoInfo), and a NoVideoSource never produces one. Camera modes use the real
@@ -182,6 +198,9 @@ class StreamService : Service(), ConnectChecker {
         else
             Camera2Source(this)
         val audio: AudioSource = if (mode == Mode.CAMERA_ONLY) NoAudioSource() else MicrophoneSource()
+
+        // Encrypted transport is handled separately (phone pushes to the PC); the RTSP path below is unchanged.
+        if (isSrt) { startSrtStreaming(mode, quality, srtHost, srtPort, srtPass, video, audio); return }
 
         try {
             // Phone = RTSP server. Constructor arg order is (context, PORT, connectChecker, video, audio).
@@ -255,6 +274,52 @@ class StreamService : Service(), ConnectChecker {
         }
     }
 
+    /**
+     * Encrypted mode: build an SrtStream and push to the PC's SRT listener with an AES passphrase.
+     * The PC is the server here, so "connected" comes from the ConnectChecker callbacks (see below),
+     * not a client listener. Mirrors the RTSP prepare/mode logic; only the transport differs.
+     */
+    private fun startSrtStreaming(mode: Mode, quality: Quality, srtHost: String?, srtPort: Int,
+                                  srtPass: String?, video: VideoSource, audio: AudioSource) {
+        try {
+            val rotation = com.pedro.encoder.input.video.CameraHelper.getCameraOrientation(this)
+            val s = SrtStream(this, this, video, audio)
+            if (mode == Mode.MIC_ONLY) s.getStreamClient().setOnlyAudio(true)
+            if (mode == Mode.CAMERA_ONLY) s.getStreamClient().setOnlyVideo(true)
+            s.getStreamClient().setPassphrase(srtPass ?: "", EncryptionType.AES128)
+            s.getStreamClient().setLatency(SRT_LATENCY_MS)
+
+            val videoOk = if (mode == Mode.MIC_ONLY)
+                s.prepareVideo(MIC_ONLY_W, MIC_ONLY_H, MIC_ONLY_BITRATE, MIC_ONLY_FPS, I_FRAME_INTERVAL, rotation = rotation)
+            else
+                s.prepareVideo(quality.w, quality.h, quality.bitrate, quality.fps, I_FRAME_INTERVAL, rotation = rotation)
+            val audioOk = s.prepareAudio(AUDIO_SAMPLE_RATE, AUDIO_STEREO, AUDIO_BITRATE)
+            if (!videoOk || !audioOk) {
+                Log.e(TAG, "prepare failed (video=$videoOk audio=$audioOk) — try a lower Quality preset")
+                stopSelf(); return
+            }
+
+            s.startStream("srt://$srtHost:$srtPort")   // connect out to the PC and push (encrypted)
+            srtStream = s
+            streamUrl = "Encrypted → $srtHost"
+            isRunning = true
+            acquireWakeLock()
+            lastClientMs = SystemClock.elapsedRealtime()
+            idleHandler.postDelayed(idleCheck, IDLE_CHECK_MS)
+            // No control listener in SRT mode: when the PC stops, its listener closes and our
+            // connection drops -> onDisconnect stops us (see ConnectChecker below).
+            Log.i(TAG, "SRT push up ($mode, ${quality.label}) to srt://$srtHost:$srtPort")
+            updateNotification()
+        } catch (e: Exception) {
+            Log.e(TAG, "startSrtStreaming failed", e)
+            releaseWakeLock()
+            runCatching { srtStream?.stopStream() }
+            srtStream = null
+            isRunning = false
+            stopSelf()
+        }
+    }
+
     /** Pull URL from the phone's Wi-Fi (wlan) IPv4, skipping VPN/cellular interfaces. Null if none. */
     private fun wifiRtspUrl(): String? = try {
         java.net.NetworkInterface.getNetworkInterfaces().toList()
@@ -270,7 +335,7 @@ class StreamService : Service(), ConnectChecker {
 
     /** Toggle front/back camera on the running stream (no-op in mic-only mode). */
     private fun switchCamera() {
-        val cam = stream?.videoSource as? Camera2Source ?: return
+        val cam = (stream?.videoSource ?: srtStream?.videoSource) as? Camera2Source ?: return
         runCatching { cam.switchCamera() }.onFailure { Log.w(TAG, "switchCamera failed", it) }
     }
 
@@ -345,7 +410,8 @@ class StreamService : Service(), ConnectChecker {
         runCatching { controlServer?.close() }; controlServer = null   // unblocks the accept() loop
         releaseWakeLock()
         stream?.let { if (it.isStreaming) it.stopStream() }
-        stream = null
+        runCatching { srtStream?.let { if (it.isStreaming) it.stopStream() } }
+        stream = null; srtStream = null; isSrt = false
         isRunning = false
         streamUrl = null
         clientConnected = false; everConnected = false
@@ -402,11 +468,27 @@ class StreamService : Service(), ConnectChecker {
     }
 
     // --- ConnectChecker (com.pedro.common). For a server these fire as clients attach/detach. ---
-    override fun onConnectionStarted(url: String) { Log.d(TAG, "encoder session starting: $url") }
-    override fun onConnectionSuccess() { Log.i(TAG, "encoder session ready") }
-    override fun onConnectionFailed(reason: String) { Log.w(TAG, "encoder session failed: $reason") }
+    override fun onConnectionStarted(url: String) { Log.d(TAG, "connection starting: $url") }
+    override fun onConnectionSuccess() {
+        // In SRT mode these callbacks reflect the real PC connection (phone = client). In RTSP mode
+        // they're just our own encoder session, so "PC connected" comes from the ClientListener instead.
+        if (isSrt) {
+            clientConnected = true; everConnected = true; lastClientMs = SystemClock.elapsedRealtime()
+            Log.i(TAG, "SRT connected to PC")
+        } else Log.i(TAG, "encoder session ready")
+    }
+    override fun onConnectionFailed(reason: String) {
+        Log.w(TAG, "connection failed: $reason")
+        if (isSrt) idleHandler.post { stopStreaming() }   // couldn't reach the PC listener — give up cleanly
+    }
     override fun onNewBitrate(bitrate: Long) { /* hook for adaptive bitrate */ }
-    override fun onDisconnect() { Log.i(TAG, "encoder session ended") }
+    override fun onDisconnect() {
+        if (isSrt) {
+            clientConnected = false
+            Log.i(TAG, "SRT disconnected (PC stopped?) — stopping")
+            idleHandler.post { stopStreaming() }
+        } else Log.i(TAG, "encoder session ended")
+    }
     override fun onAuthError() { Log.w(TAG, "auth error") }
     override fun onAuthSuccess() { Log.d(TAG, "auth success") }
 }

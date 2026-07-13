@@ -67,7 +67,7 @@ public class PhoneCamGui : Form
     RadioButton rbUsb, rbWifi, rbQr;
     LinkLabel linkIp, linkDiag;
     TextBox tbIp;
-    CheckBox cbMic, cbFlipH, cbFlipV, cbUdp;
+    CheckBox cbMic, cbFlipH, cbFlipV, cbUdp, cbEncrypt;
     ComboBox cbBoost, cbEq;
     string customEq = "";        // user-defined band list ("type:f:q:db;...") from the EQ editor
     int prevEqIndex = 0;         // revert target if the custom editor is cancelled
@@ -91,10 +91,13 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.4.20";
+    const string Version = "0.4.21";
     const string RtspUser = "phonecam";   // Basic-auth username the phone expects
     const int LocalPort = 18554, PhonePort = 8554;
     const int PhoneControlPort = 8555, LocalControlPort = 18555;   // "stop the phone now" channel (USB uses the forward)
+    const int SrtPort = 8890;    // UDP port the PC's SRT listener binds in encrypted mode
+    bool srtMode = false;        // this session is an encrypted SRT listen (phone pushes to us)
+    string srtPass = "";         // the SRT passphrase for this session (kept out of logs)
     bool usbForwarded = false, running = false;
     volatile bool videoSeen = false, audioSeen = false, reachIssue = false;   // from receiver stderr, drive the status
 
@@ -159,7 +162,7 @@ public class PhoneCamGui : Form
         Text = "PhoneCam v" + Version;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(744, 552);
+        ClientSize = new Size(744, 570);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Bg; ForeColor = Fg;
         Font = new Font("Segoe UI", 9.5f);
@@ -195,32 +198,34 @@ public class PhoneCamGui : Form
         cbFlipH = Check("Flip left / right", 22, 278);
         cbFlipV = Check("Flip up / down", 22, 304);
         cbUdp = Check("Lower latency (Wi-Fi) — may glitch", 22, 330);
-        Controls.Add(cbMic); Controls.Add(cbBoost); Controls.Add(cbEq); Controls.Add(cbFlipH); Controls.Add(cbFlipV); Controls.Add(cbUdp);
+        cbEncrypt = Check("Encrypted (🔒 Wi-Fi QR only)", 22, 354);
+        cbEncrypt.CheckedChanged += (s, e) => { if (cbEncrypt.Checked) cbUdp.Checked = false; };
+        Controls.Add(cbMic); Controls.Add(cbBoost); Controls.Add(cbEq); Controls.Add(cbFlipH); Controls.Add(cbFlipV); Controls.Add(cbUdp); Controls.Add(cbEncrypt);
 
-        btnStart = new Button { Text = "Start", Location = new Point(22, 368), Size = new Size(224, 40), FlatStyle = FlatStyle.Flat, BackColor = Accent, ForeColor = Color.White, Font = new Font("Segoe UI Semibold", 11f) };
+        btnStart = new Button { Text = "Start", Location = new Point(22, 386), Size = new Size(224, 40), FlatStyle = FlatStyle.Flat, BackColor = Accent, ForeColor = Color.White, Font = new Font("Segoe UI Semibold", 11f) };
         btnStart.FlatAppearance.BorderSize = 0;
         btnStart.Click += OnStartStop;
         Controls.Add(btnStart);
 
-        lblDot = new Label { Text = "●", ForeColor = Sub, Location = new Point(24, 422), AutoSize = true, Font = new Font("Segoe UI", 11f) };
-        lblStatus = new Label { Text = "Idle", ForeColor = Sub, Location = new Point(44, 424), AutoSize = true, MaximumSize = new Size(220, 0) };
+        lblDot = new Label { Text = "●", ForeColor = Sub, Location = new Point(24, 440), AutoSize = true, Font = new Font("Segoe UI", 11f) };
+        lblStatus = new Label { Text = "Idle", ForeColor = Sub, Location = new Point(44, 442), AutoSize = true, MaximumSize = new Size(220, 0) };
         Controls.Add(lblDot); Controls.Add(lblStatus);
 
         // Live mic level meter (visible only while the mic is streaming).
-        micLabel = new Label { Text = "Mic", ForeColor = Sub, Location = new Point(24, 450), AutoSize = true, Font = new Font("Segoe UI", 8.25f), Visible = false };
-        micMeter = new Panel { Location = new Point(56, 451), Size = new Size(180, 12), BackColor = Color.FromArgb(20, 22, 25), Visible = false };
+        micLabel = new Label { Text = "Mic", ForeColor = Sub, Location = new Point(24, 468), AutoSize = true, Font = new Font("Segoe UI", 8.25f), Visible = false };
+        micMeter = new Panel { Location = new Point(56, 469), Size = new Size(180, 12), BackColor = Color.FromArgb(20, 22, 25), Visible = false };
         micMeter.Paint += PaintMeter;
         Controls.Add(micLabel); Controls.Add(micMeter);
 
-        tip = new Label { Text = TipText(false), ForeColor = Sub, Location = new Point(22, 474), AutoSize = true };
+        tip = new Label { Text = TipText(false), ForeColor = Sub, Location = new Point(22, 492), AutoSize = true };
         Controls.Add(tip);
 
-        linkDiag = new LinkLabel { Text = "Copy diagnostics", Location = new Point(22, 522), AutoSize = true, LinkColor = Accent, ActiveLinkColor = Accent, LinkBehavior = LinkBehavior.AlwaysUnderline, Font = new Font("Segoe UI", 9f) };
+        linkDiag = new LinkLabel { Text = "Copy diagnostics", Location = new Point(22, 540), AutoSize = true, LinkColor = Accent, ActiveLinkColor = Accent, LinkBehavior = LinkBehavior.AlwaysUnderline, Font = new Font("Segoe UI", 9f) };
         linkDiag.LinkClicked += (s, e) => CopyDiagnostics();
         Controls.Add(linkDiag);
 
         // Right: embedded live preview (also hosts the pairing QR before a phone connects)
-        preview = new Panel { Location = new Point(260, 84), Size = new Size(468, 444), BackColor = Color.FromArgb(12, 13, 15), BorderStyle = BorderStyle.None };
+        preview = new Panel { Location = new Point(260, 84), Size = new Size(468, 462), BackColor = Color.FromArgb(12, 13, 15), BorderStyle = BorderStyle.None };
         preview.Paint += (s, e) => { using (var pen = new Pen(Line)) e.Graphics.DrawRectangle(pen, 0, 0, preview.Width - 1, preview.Height - 1); };
         previewHint = new Label { Text = "Live preview appears here once you press Start.", ForeColor = Sub, BackColor = Color.FromArgb(12, 13, 15), AutoSize = true, Location = new Point(16, 16) };
         // Centered as one vertical group inside the 468×392 preview panel: the QR block itself
@@ -331,7 +336,7 @@ public class PhoneCamGui : Form
     {
         rbUsb.Enabled = on; rbQr.Enabled = on; rbWifi.Enabled = on; linkIp.Enabled = on;
         tbIp.Enabled = on && rbWifi.Checked;
-        cbMic.Enabled = on; cbFlipH.Enabled = on; cbFlipV.Enabled = on; cbUdp.Enabled = on;
+        cbMic.Enabled = on; cbFlipH.Enabled = on; cbFlipV.Enabled = on; cbUdp.Enabled = on; cbEncrypt.Enabled = on;
         cbBoost.Enabled = on && cbMic.Checked;
         cbEq.Enabled = on && cbMic.Checked;
     }
@@ -469,8 +474,10 @@ public class PhoneCamGui : Form
 
         // Fresh user-initiated start: clear any leftover reconnect/stop state.
         // No token for USB/manual-IP (no handshake) — USB stops are authorized by loopback on the phone.
-        manualStop = false; reconnecting = false; wentLive = false; reconnectAttempts = 0; phoneToken = "";
-        Log("Start: mode=" + (rbUsb.Checked ? "usb" : rbQr.Checked ? "qr" : "wifi-ip") + " mic=" + useMic);
+        manualStop = false; reconnecting = false; wentLive = false; reconnectAttempts = 0; phoneToken = ""; srtMode = false;
+        Log("Start: mode=" + (rbUsb.Checked ? "usb" : rbQr.Checked ? "qr" : "wifi-ip") + " mic=" + useMic + " enc=" + (rbQr.Checked && cbEncrypt.Checked));
+        // Encrypted Wi-Fi: we become the SRT listener and the phone pushes to us (AES). QR carries our endpoint.
+        if (rbQr.Checked && cbEncrypt.Checked) { StartSrtPairing(useMic); return; }
         // Wi-Fi QR pairing: show a code, let the phone scan it and announce its URL to us.
         if (rbQr.Checked) { StartQrPairing(useMic); return; }
 
@@ -501,7 +508,8 @@ public class PhoneCamGui : Form
     {
         lastUrl = url; lastUseMic = useMic; reconnecting = false;   // remember the target for auto-reconnect
         // Where to send "stop now": the phone's IP over Wi-Fi, or the forwarded loopback port over USB.
-        controlHost = HostOf(url);
+        // In SRT mode the phone is the client, so there's no stop channel — it stops when we (the listener) do.
+        controlHost = srtMode ? "" : HostOf(url);
         controlPort = usbForwarded ? LocalControlPort : PhoneControlPort;
         // USB has no QR handshake, so fetch the phone's RTSP secret over the (loopback-only) control port.
         if (usbForwarded && phoneToken.Length == 0) phoneToken = QueryUsbCreds();
@@ -512,7 +520,7 @@ public class PhoneCamGui : Form
         if (cbFlipV.Checked) a.Add("--flip-v");
         // UDP avoids TCP's retransmit stalls (lower/steadier latency on busy Wi-Fi) but can't ride the
         // USB adb tunnel, which is TCP-only — so only over Wi-Fi/QR.
-        if (cbUdp.Checked && !usbForwarded) a.Add("--udp");
+        if (cbUdp.Checked && !usbForwarded && !srtMode) a.Add("--udp");
         if (useMic)
         {
             a.Add("--audio-device"); a.Add("CABLE Input");
@@ -527,7 +535,7 @@ public class PhoneCamGui : Form
         if (phoneToken.Length > 0) { a.Add("--rtsp-user"); a.Add(RtspUser); a.Add("--rtsp-pass"); a.Add(phoneToken); }
 
         string args = BuildArgs(a);
-        Log("launching receiver: " + (phoneToken.Length > 0 ? args.Replace(phoneToken, "***") : args));   // never log the password
+        Log("launching receiver: " + Redact(args));   // never log the RTSP password / SRT passphrase
         var psi = new ProcessStartInfo(receiverExe, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true, StandardErrorEncoding = Encoding.UTF8 };
         recv = new Process { StartInfo = psi };
         recv.ErrorDataReceived += (s, ev) =>
@@ -545,7 +553,7 @@ public class PhoneCamGui : Form
                 }
                 return;
             }
-            Log("[recv] " + (phoneToken.Length > 0 ? d.Replace(phoneToken, "***") : d));   // mask the password if FFmpeg echoes the URL
+            Log("[recv] " + Redact(d));   // mask the password / passphrase if FFmpeg echoes the URL
             if (d.IndexOf("[video]", StringComparison.OrdinalIgnoreCase) >= 0) videoSeen = true;
             if (d.IndexOf("[audio] rendering", StringComparison.OrdinalIgnoreCase) >= 0) audioSeen = true;
             if (d.IndexOf("401", StringComparison.Ordinal) >= 0 || d.IndexOf("Unauthorized", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -559,11 +567,30 @@ public class PhoneCamGui : Form
 
         running = true; embedded = IntPtr.Zero;
         devicesPanel.Visible = false;
-        previewHint.Visible = true;
+        if (!srtMode) previewHint.Visible = true;   // in SRT mode the QR stays up until the phone connects
         tip.Text = TipText(useMic);
         SetInputsEnabled(false);
         btnStart.Text = "Stop"; btnStart.BackColor = Color.FromArgb(70, 74, 82);
         timer.Start();
+    }
+
+    /// <summary>Encrypted mode: run receiver.exe as an SRT listener and show a QR the phone pushes to.
+    /// No TCP announce-back — the phone connects out to us and pushes an AES stream.</summary>
+    void StartSrtPairing(bool useMic)
+    {
+        string ip = LocalIPv4();
+        if (ip == null) { MessageBox.Show("Couldn't determine this PC's Wi-Fi address. Use USB, or turn off Encrypted.", "PhoneCam"); return; }
+        srtMode = true;
+        srtPass = Guid.NewGuid().ToString("N").Substring(0, 24);   // 24-hex SRT passphrase (min 10, max 79)
+        string listenUrl = "srt://0.0.0.0:" + SrtPort + "?mode=listener&passphrase=" + srtPass + "&pbkeylen=16&latency=120000";
+        string payload = "PCAM2:" + ip + ":" + SrtPort + ":" + srtPass;
+        Log("SRT: listening (encrypted) on udp/" + SrtPort + " — waiting for the phone to scan");
+        try { qrBox.Image = MakeQr(payload); }
+        catch (Exception ex) { MessageBox.Show("Couldn't render the QR: " + ex.Message, "PhoneCam"); srtMode = false; return; }
+        qrLabel.Text = "Scan this with the PhoneCam app\n(encrypted 🔒)";
+        qrLabel.Visible = true; qrBox.Visible = true;
+        SetStatus(Amber, "Scan the QR (encrypted) with the PhoneCam app…");
+        StartReceiverWithUrl(listenUrl, useMic);   // launches the listener + sets running/Stop/timer
     }
 
     /// <summary>Show a pairing QR and wait (off the UI thread) for the phone to announce its URL.</summary>
@@ -764,6 +791,9 @@ public class PhoneCamGui : Form
         bool hasVideo = videoSeen || embedded != IntPtr.Zero;
         // Back to a live feed → this URL is good; refill the reconnect budget for the next blip.
         if (hasVideo || audioSeen) { wentLive = true; reconnectAttempts = 0; }
+        // Phone connected → drop the pairing QR (SRT has no OnPaired step to do it).
+        if ((hasVideo || audioSeen) && qrBox.Visible)
+        { qrLabel.Visible = false; qrBox.Visible = false; if (qrBox.Image != null) { var i = qrBox.Image; qrBox.Image = null; i.Dispose(); } }
         bool micActive = running && audioSeen;
         if (micMeter.Visible != micActive) { micMeter.Visible = micActive; micLabel.Visible = micActive; }
         if (hasVideo) SetStatus(Green, "Live — select “PhoneCam Camera” in your app");
@@ -773,6 +803,8 @@ public class PhoneCamGui : Form
             SetStatus(Green, "Live (mic) — pick “CABLE Output” as your microphone");
             if (embedded == IntPtr.Zero) { previewHint.Text = "Microphone only — no video."; previewHint.Visible = true; }
         }
+        else if (srtMode)
+            SetStatus(Amber, "Waiting for the phone to connect (encrypted)…");
         else if (authIssue)
             SetStatus(Amber, "Phone requires pairing — connect with the QR or a saved device, not a typed IP.");
         else if (reachIssue)
@@ -808,6 +840,14 @@ public class PhoneCamGui : Form
         else ThreadPool.QueueUserWorkItem(delegate { send(); });
     }
 
+    /// <summary>Mask secrets (RTSP password / SRT passphrase) before anything reaches the log.</summary>
+    string Redact(string s)
+    {
+        if (phoneToken.Length > 0) s = s.Replace(phoneToken, "***");
+        if (srtPass.Length > 0) s = s.Replace(srtPass, "***");
+        return s;
+    }
+
     /// <summary>Over USB, ask the phone (via the loopback-forwarded control port) for its RTSP secret so
     /// we can authenticate the pull. The phone only answers this on loopback. "" if unavailable.</summary>
     string QueryUsbCreds()
@@ -835,6 +875,7 @@ public class PhoneCamGui : Form
         if (running) Log("stopped");
         timer.Stop();
         reconnecting = false;
+        srtMode = false;
         embedded = IntPtr.Zero;
         micLevel = 0f;
         if (micMeter != null) { micMeter.Visible = false; micLabel.Visible = false; }
@@ -945,6 +986,7 @@ public class PhoneCamGui : Form
                     case "flipH": cbFlipH.Checked = kv[1] == "1"; break;
                     case "flipV": cbFlipV.Checked = kv[1] == "1"; break;
                     case "udp": cbUdp.Checked = kv[1] == "1"; break;
+                    case "encrypt": cbEncrypt.Checked = kv[1] == "1"; break;
                     case "boost": { int bi; if (int.TryParse(kv[1], out bi) && bi >= 0 && bi < BoostDb.Length) cbBoost.SelectedIndex = bi; } break;
                     case "eqcustom": customEq = kv[1]; break;
                     case "eq": { int ei; if (int.TryParse(kv[1], out ei) && ei >= 0 && ei < cbEq.Items.Count) { suppressEqDialog = true; cbEq.SelectedIndex = ei; suppressEqDialog = false; prevEqIndex = ei; } } break;
@@ -972,6 +1014,7 @@ public class PhoneCamGui : Form
                 "flipH=" + (cbFlipH.Checked ? "1" : "0"),
                 "flipV=" + (cbFlipV.Checked ? "1" : "0"),
                 "udp=" + (cbUdp.Checked ? "1" : "0"),
+                "encrypt=" + (cbEncrypt.Checked ? "1" : "0"),
                 "boost=" + cbBoost.SelectedIndex,
                 "eqcustom=" + customEq,
                 "eq=" + cbEq.SelectedIndex,

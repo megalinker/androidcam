@@ -45,6 +45,7 @@ class MainActivity : AppCompatActivity() {
 
     // Wi-Fi pairing: the PC target from the last scanned QR, held across the permission prompt.
     private var pendingTarget: PcTarget? = null
+    private var pendingSrt: SrtTarget? = null   // same, for an encrypted (SRT) code
     // A note shown in the status card while streaming but not yet connected (e.g. announce failed).
     private var pairingNote: String? = null
     private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
@@ -97,6 +98,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onScanned(payload: String) {
+        if (payload.trim().startsWith("PCAM2:")) {                 // encrypted (SRT) code
+            val srt = SrtTarget.parse(payload)
+            if (srt == null) {
+                Toast.makeText(this, "That isn't a valid PhoneCam code.", Toast.LENGTH_SHORT).show()
+                return
+            }
+            pendingSrt = srt
+            if (ensurePermissions()) beginSrt()
+            return
+        }
         val target = PcTarget.parse(payload)
         if (target == null) {
             Toast.makeText(this, "That isn't a PhoneCam PC code.", Toast.LENGTH_SHORT).show()
@@ -104,6 +115,32 @@ class MainActivity : AppCompatActivity() {
         }
         pendingTarget = target
         if (ensurePermissions()) beginPairing()   // else resumed from onRequestPermissionsResult
+    }
+
+    /** Encrypted mode: push an SRT stream to the scanned PC. No announce-back — the phone connects out. */
+    private fun beginSrt() {
+        val srt = pendingSrt ?: return
+        pendingSrt = null
+        pairingNote = null
+        if (!StreamService.isRunning) startSrtStreaming(srt)
+        Toast.makeText(this, "Connecting (encrypted) to ${srt.host}…", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun startSrtStreaming(srt: SrtTarget) {
+        prefs.edit()
+            .putString(KEY_MODE, selectedMode().name)
+            .putString(KEY_QUALITY, selectedQuality().name)
+            .apply()
+        val intent = Intent(this, StreamService::class.java).apply {
+            action = StreamService.ACTION_START
+            putExtra(StreamService.EXTRA_MODE, selectedMode().name)
+            putExtra(StreamService.EXTRA_QUALITY, selectedQuality().name)
+            putExtra(StreamService.EXTRA_TRANSPORT, "srt")
+            putExtra(StreamService.EXTRA_SRT_HOST, srt.host)
+            putExtra(StreamService.EXTRA_SRT_PORT, srt.port)
+            putExtra(StreamService.EXTRA_SRT_PASS, srt.passphrase)
+        }
+        ContextCompat.startForegroundService(this, intent)
     }
 
     /** Start streaming (if needed), then announce our pull URL to the scanned PC on a worker thread. */
@@ -278,9 +315,13 @@ class MainActivity : AppCompatActivity() {
         val camOk = isGranted(permissions, grantResults, Manifest.permission.CAMERA)
         val micOk = isGranted(permissions, grantResults, Manifest.permission.RECORD_AUDIO)
         if (camOk && micOk) {
-            if (pendingTarget != null) beginPairing() else startStreaming()
+            when {
+                pendingSrt != null -> beginSrt()
+                pendingTarget != null -> beginPairing()
+                else -> startStreaming()
+            }
         } else {
-            pendingTarget = null
+            pendingTarget = null; pendingSrt = null
             pcStatus.text = "Camera and microphone permissions are required."
         }
     }

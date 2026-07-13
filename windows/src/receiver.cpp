@@ -225,6 +225,13 @@ struct Options {
     std::string rtspPass;
 };
 
+// URL safe to print: drop the query string (SRT carries ?passphrase=… there) so no secret is logged.
+static std::string log_url(const char* url) {
+    std::string u = url ? url : "";
+    size_t q = u.find('?');
+    return q == std::string::npos ? u : u.substr(0, q);
+}
+
 // Build the URL actually handed to FFmpeg: rtsp://user:pass@host/… when credentials are set.
 // Kept separate from opt.url so the plain URL (no password) is what appears in logs.
 static std::string auth_url(const Options& o) {
@@ -262,22 +269,31 @@ static Options parse_args(int argc, char** argv) {
 // negative if the stream failed/ended and the caller should reconnect. `preview` (may be null)
 // persists across reconnects so the window isn't torn down between attempts.
 static int run_session(const Options& opt, PreviewWindow* preview) {
+    bool isSrt = opt.url && strncmp(opt.url, "srt://", 6) == 0;
     AVDictionary* opts = nullptr;
-    av_dict_set(&opts, "rtsp_transport", opt.udp ? "udp" : "tcp", 0);
-    av_dict_set(&opts, "rtsp_flags",     "prefer_tcp", 0);
-    av_dict_set(&opts, "timeout",        "5000000", 0);
-    if (opt.smooth) {
-        // Absorb Wi-Fi jitter with a reorder buffer + demux delay (smoother, higher latency).
-        av_dict_set(&opts, "reorder_queue_size", "2048", 0);
-        av_dict_set(&opts, "max_delay",          "500000", 0);
+    if (isSrt) {
+        // SRT (encrypted) carries its transport params in the URL query (mode=listener, passphrase,
+        // pbkeylen, latency). Crucially: no rtsp_* options and NO demux "timeout" — the listener must
+        // block on open until the phone connects, which can take longer than any fixed timeout.
+        av_dict_set(&opts, "probesize",       "1000000", 0);
+        av_dict_set(&opts, "analyzeduration", "1000000", 0);
     } else {
-        // Lowest latency: no reordering, no demux buffering.
-        av_dict_set(&opts, "reorder_queue_size", "0", 0);
-        av_dict_set(&opts, "max_delay",          "0", 0);
-        // Don't spend the default 5s / 5MB analysing a stream we already know (H264 + AAC): cap it so
-        // the first frame shows quickly instead of a long "Connecting…" pause.
-        av_dict_set(&opts, "probesize",          "1000000", 0);   // 1 MB
-        av_dict_set(&opts, "analyzeduration",    "1000000", 0);   // 1 s
+        av_dict_set(&opts, "rtsp_transport", opt.udp ? "udp" : "tcp", 0);
+        av_dict_set(&opts, "rtsp_flags",     "prefer_tcp", 0);
+        av_dict_set(&opts, "timeout",        "5000000", 0);
+        if (opt.smooth) {
+            // Absorb Wi-Fi jitter with a reorder buffer + demux delay (smoother, higher latency).
+            av_dict_set(&opts, "reorder_queue_size", "2048", 0);
+            av_dict_set(&opts, "max_delay",          "500000", 0);
+        } else {
+            // Lowest latency: no reordering, no demux buffering.
+            av_dict_set(&opts, "reorder_queue_size", "0", 0);
+            av_dict_set(&opts, "max_delay",          "0", 0);
+            // Don't spend the default 5s / 5MB analysing a stream we already know (H264 + AAC): cap it so
+            // the first frame shows quickly instead of a long "Connecting…" pause.
+            av_dict_set(&opts, "probesize",          "1000000", 0);   // 1 MB
+            av_dict_set(&opts, "analyzeduration",    "1000000", 0);   // 1 s
+        }
     }
 
     AVFormatContext* fmt = avformat_alloc_context();
@@ -287,14 +303,14 @@ static int run_session(const Options& opt, PreviewWindow* preview) {
     std::string openUrl = auth_url(opt);   // has credentials if set; opt.url stays plain for logs
     int ret = avformat_open_input(&fmt, openUrl.c_str(), nullptr, &opts);
     av_dict_free(&opts);
-    if (ret < 0) { fprintf(stderr, "open_input(%s): %s\n", opt.url, errstr(ret).c_str()); return -1; }
+    if (ret < 0) { fprintf(stderr, "open_input(%s): %s\n", log_url(opt.url).c_str(), errstr(ret).c_str()); return -1; }
 
     if ((ret = avformat_find_stream_info(fmt, nullptr)) < 0) {
         fprintf(stderr, "find_stream_info: %s\n", errstr(ret).c_str());
         avformat_close_input(&fmt);
         return -1;
     }
-    av_dump_format(fmt, 0, opt.url, 0);
+    av_dump_format(fmt, 0, log_url(opt.url).c_str(), 0);
 
     int vstream = -1, astream = -1;
     AVCodecContext* vdec = nullptr;
@@ -365,8 +381,10 @@ int main(int argc, char** argv) {
     signal(SIGINT, on_sigint);
     avformat_network_init();
 
+    bool urlIsSrt = opt.url && strncmp(opt.url, "srt://", 6) == 0;
     fprintf(stderr, "[phonecam] url=%s  transport=%s  pacing=%s  audio=%s\n",
-            opt.url, opt.udp ? "udp" : "tcp", opt.smooth ? "smooth" : "low-latency",
+            log_url(opt.url).c_str(), urlIsSrt ? "srt (encrypted)" : (opt.udp ? "udp" : "tcp"),
+            opt.smooth ? "smooth" : "low-latency",
             opt.noAudio ? "off" : (opt.audioDevice.empty() ? "default-output" : opt.audioDevice.c_str()));
 
     PreviewWindow preview;
