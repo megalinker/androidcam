@@ -221,7 +221,21 @@ struct Options {
     std::string audioDevice;
     float micGainDb = 0.0f;   // boost the (quiet) phone mic; soft-limited in the sink
     std::string eqPreset;     // voice EQ: preset name or a "type:freq:q:gain;..." band list
+    std::string rtspUser;     // RTSP Basic-auth credentials (kept out of the logged URL)
+    std::string rtspPass;
 };
+
+// Build the URL actually handed to FFmpeg: rtsp://user:pass@host/… when credentials are set.
+// Kept separate from opt.url so the plain URL (no password) is what appears in logs.
+static std::string auth_url(const Options& o) {
+    if (o.rtspUser.empty() || !o.url) return o.url ? o.url : "";
+    std::string url = o.url;
+    size_t p = url.find("://");
+    if (p == std::string::npos) return url;
+    std::string creds = o.rtspUser;
+    if (!o.rtspPass.empty()) creds += ":" + o.rtspPass;
+    return url.substr(0, p + 3) + creds + "@" + url.substr(p + 3);
+}
 
 static Options parse_args(int argc, char** argv) {
     Options o;
@@ -236,6 +250,8 @@ static Options parse_args(int argc, char** argv) {
         else if (a == "--audio-device" && i + 1 < argc) o.audioDevice = argv[++i];
         else if (a == "--mic-gain" && i + 1 < argc) o.micGainDb = (float)atof(argv[++i]);
         else if (a == "--eq" && i + 1 < argc) o.eqPreset = argv[++i];
+        else if (a == "--rtsp-user" && i + 1 < argc) o.rtspUser = argv[++i];
+        else if (a == "--rtsp-pass" && i + 1 < argc) o.rtspPass = argv[++i];
         else if (a.rfind("--", 0) == 0) fprintf(stderr, "ignoring unknown option: %s\n", a.c_str());
         else o.url = argv[i];
     }
@@ -268,7 +284,8 @@ static int run_session(const Options& opt, PreviewWindow* preview) {
     if (!fmt) { av_dict_free(&opts); return -1; }
     if (!opt.smooth) fmt->flags |= AVFMT_FLAG_NOBUFFER | AVFMT_FLAG_FLUSH_PACKETS;
 
-    int ret = avformat_open_input(&fmt, opt.url, nullptr, &opts);
+    std::string openUrl = auth_url(opt);   // has credentials if set; opt.url stays plain for logs
+    int ret = avformat_open_input(&fmt, openUrl.c_str(), nullptr, &opts);
     av_dict_free(&opts);
     if (ret < 0) { fprintf(stderr, "open_input(%s): %s\n", opt.url, errstr(ret).c_str()); return -1; }
 
@@ -342,7 +359,7 @@ int main(int argc, char** argv) {
         fprintf(stderr,
             "usage: %s rtsp://<phone-ip>:8554/ [--preview] [--no-audio] "
             "[--audio-device <name-substr>] [--mic-gain <db>] [--eq <preset|type:f:q:db;...>] "
-            "[--udp] [--smooth] [--flip-h] [--flip-v]\n", argv[0]);
+            "[--rtsp-user <u>] [--rtsp-pass <p>] [--udp] [--smooth] [--flip-h] [--flip-v]\n", argv[0]);
         return 1;
     }
     signal(SIGINT, on_sigint);

@@ -175,6 +175,8 @@ struct WasapiSink::Impl {
     bool started = false;
     float gainLinear = 1.0f;   // mic boost (linear), applied with a soft limiter before render
     std::vector<Biquad> eq;    // voice EQ cascade (any number of bands), applied before the gain
+    float levelPeak = 0.0f;    // running peak of the outgoing signal, for the GUI's mic meter
+    DWORD levelLastMs = 0;     // last time we emitted a [level] line (throttled to ~10 Hz)
 };
 
 WasapiSink::WasapiSink() : p_(new Impl) {}
@@ -317,6 +319,29 @@ bool WasapiSink::WriteFrame(const AVFrame* frame) {
                 for (auto& b : s.eq) x = b.process(x, ch);
                 q[i] = (int32_t)std::llrint((double)softLimit(x * s.gainLinear) * 2147483647.0);
             }
+        }
+    }
+
+    // Mic level for the GUI meter: peak of the outgoing chunk, emitted a few times a second.
+    if (got > 0) {
+        int n = got * s.outChannels;
+        float peak = 0.0f;
+        if (s.outFmt == AV_SAMPLE_FMT_FLT) {
+            const float* f = reinterpret_cast<const float*>(s.buf);
+            for (int i = 0; i < n; ++i) { float a = std::fabs(f[i]); if (a > peak) peak = a; }
+        } else if (s.outFmt == AV_SAMPLE_FMT_S16) {
+            const int16_t* q = reinterpret_cast<const int16_t*>(s.buf);
+            for (int i = 0; i < n; ++i) { float a = std::fabs(q[i] / 32768.0f); if (a > peak) peak = a; }
+        } else if (s.outFmt == AV_SAMPLE_FMT_S32) {
+            const int32_t* q = reinterpret_cast<const int32_t*>(s.buf);
+            for (int i = 0; i < n; ++i) { float a = (float)std::fabs(q[i] / 2147483648.0); if (a > peak) peak = a; }
+        }
+        if (peak > s.levelPeak) s.levelPeak = peak;
+        DWORD now = GetTickCount();
+        if (now - s.levelLastMs >= 100) {                  // ~10 Hz
+            fprintf(stderr, "[level] %.3f\n", s.levelPeak);
+            s.levelPeak = 0.0f;
+            s.levelLastMs = now;
         }
     }
 

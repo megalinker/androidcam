@@ -62,6 +62,8 @@ class StreamService : Service(), ConnectChecker {
         // Stop sends this — a mere client drop (blip) does not, so auto-reconnect still works.
         const val CONTROL_PORT = 8555
         private const val CONTROL_STOP = "PCAM-STOP"
+        private const val CONTROL_CREDS = "PCAM-CREDS?"   // USB (loopback) asks for the RTSP secret
+        const val RTSP_USER = "phonecam"                  // Basic-auth username for the stream
         const val I_FRAME_INTERVAL = 1   // 1s GOP: faster first frame + quicker recovery after a glitch
 
         // Auto-stop after this long with no PC pulling — the encoder/camera run whether or not anyone
@@ -189,6 +191,12 @@ class StreamService : Service(), ConnectChecker {
             if (mode == Mode.MIC_ONLY) s.getStreamClient().setOnlyAudio(true)
             if (mode == Mode.CAMERA_ONLY) s.getStreamClient().setOnlyVideo(true)
 
+            // Require Basic auth on the stream so a random device on the same Wi-Fi can't pull our
+            // camera/mic. The PC gets the password from the QR handshake (or, over USB, from the
+            // loopback creds query below). NOTE: RTSP here is unencrypted, so this stops casual access,
+            // not a LAN attacker who can sniff packets — but it closes the "open in VLC" hole.
+            s.getStreamClient().setAuthorization(RTSP_USER, controlToken(this))
+
             // Server-side client attach/detach. (The ConnectChecker callbacks below reflect the
             // phone's own encoder session, NOT a PC pulling — so the "PC connected" state must come
             // from here, the RTSP server's client listener.)
@@ -286,15 +294,23 @@ class StreamService : Service(), ConnectChecker {
                     try {
                         client.soTimeout = 3000
                         val line = client.getInputStream().bufferedReader(Charsets.UTF_8).readLine()?.trim()
-                        // Authorize: a matching token from anywhere, OR a bare stop over loopback — which
-                        // can only be the USB adb-forward path (already trusted via USB debugging).
                         val fromLoopback = client.inetAddress?.isLoopbackAddress == true
-                        val authorized = line == "$CONTROL_STOP:$myToken" || (fromLoopback && line == CONTROL_STOP)
-                        if (authorized) {
-                            Log.i(TAG, "authorized stop from PC — stopping stream immediately")
-                            idleHandler.post { stopStreaming() }
-                        } else if (line != null && line.startsWith(CONTROL_STOP)) {
-                            Log.w(TAG, "ignored unauthorized stop from ${client.inetAddress}")
+                        if (fromLoopback && line == CONTROL_CREDS) {
+                            // USB has no QR handshake — hand the (loopback-only, trusted) caller the RTSP
+                            // secret so it can authenticate the pull. Never answered over Wi-Fi.
+                            runCatching {
+                                client.getOutputStream().apply { write("$myToken\n".toByteArray(Charsets.UTF_8)); flush() }
+                            }
+                        } else {
+                            // Authorize a stop: a matching token from anywhere, OR a bare stop over loopback
+                            // (the USB adb-forward path, already trusted via USB debugging).
+                            val authorized = line == "$CONTROL_STOP:$myToken" || (fromLoopback && line == CONTROL_STOP)
+                            if (authorized) {
+                                Log.i(TAG, "authorized stop from PC — stopping stream immediately")
+                                idleHandler.post { stopStreaming() }
+                            } else if (line != null && line.startsWith(CONTROL_STOP)) {
+                                Log.w(TAG, "ignored unauthorized stop from ${client.inetAddress}")
+                            }
                         }
                     } catch (e: Exception) {
                         Log.w(TAG, "control read failed", e)

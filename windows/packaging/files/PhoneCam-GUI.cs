@@ -76,17 +76,23 @@ public class PhoneCamGui : Form
     // EQ dropdown index -> receiver preset name; index 5 ("custom") uses customEq instead.
     static readonly string[] EqPreset = { "", "clarity", "warm", "bright", "podcast", "clarity+", "warm+", "bright+", "podcast+", "custom" };
     Button btnStart;
-    Label lblStatus, lblDot, tip;
-    Panel preview;
+    Label lblStatus, lblDot, tip, micLabel;
+    Panel preview, micMeter;
     Label previewHint, qrLabel;
     PictureBox qrBox;
+    volatile float micLevel = 0f;   // 0..1 peak from the receiver's [level] lines, drives the mic meter
+    bool authIssue = false;         // receiver reported an auth (401) failure
+    NotifyIcon tray;
+    bool minimizeToTray = false;
+    bool startMinimized = false;    // launched with -tray (autostart) → start hidden in the tray
     System.Windows.Forms.Timer timer;
     Process recv;
     IntPtr embedded = IntPtr.Zero;
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.4.19";
+    const string Version = "0.4.20";
+    const string RtspUser = "phonecam";   // Basic-auth username the phone expects
     const int LocalPort = 18554, PhonePort = 8554;
     const int PhoneControlPort = 8555, LocalControlPort = 18555;   // "stop the phone now" channel (USB uses the forward)
     bool usbForwarded = false, running = false;
@@ -131,13 +137,18 @@ public class PhoneCamGui : Form
         BuildUi();
         LoadSettings();
         RebuildDevices(); devicesPanel.Visible = true;   // show saved devices in the idle preview panel
+        BuildTray();
         Log("PhoneCam v" + Version + " started. receiver=" + (receiverExe ?? "NOT FOUND") + " adb=" + (adbExe ?? "none"));
         timer = new System.Windows.Forms.Timer { Interval = 700 };
         timer.Tick += OnTick;
-        FormClosing += (s, e) => { SaveSettings(); if (running || reconnecting) SendPhoneStop(true); StopReceiver(); };
+        FormClosing += (s, e) => { SaveSettings(); if (running || reconnecting) SendPhoneStop(true); StopReceiver();
+                                   if (tray != null) { tray.Visible = false; tray.Dispose(); } };
         // Optional: connect immediately on launch (handy for a "start on login" shortcut).
         if (Array.IndexOf(Environment.GetCommandLineArgs(), "-autostart") >= 0)
             Shown += (s, e) => { if (!running) StartReceiver(); };
+        // -tray (used by the start-with-Windows entry): come up hidden in the notification area.
+        startMinimized = Array.IndexOf(Environment.GetCommandLineArgs(), "-tray") >= 0;
+        if (startMinimized) Shown += (s, e) => { WindowState = FormWindowState.Minimized; Hide(); };
     }
 
     static string FindFirst(string[] paths)
@@ -195,6 +206,12 @@ public class PhoneCamGui : Form
         lblStatus = new Label { Text = "Idle", ForeColor = Sub, Location = new Point(44, 424), AutoSize = true, MaximumSize = new Size(220, 0) };
         Controls.Add(lblDot); Controls.Add(lblStatus);
 
+        // Live mic level meter (visible only while the mic is streaming).
+        micLabel = new Label { Text = "Mic", ForeColor = Sub, Location = new Point(24, 450), AutoSize = true, Font = new Font("Segoe UI", 8.25f), Visible = false };
+        micMeter = new Panel { Location = new Point(56, 451), Size = new Size(180, 12), BackColor = Color.FromArgb(20, 22, 25), Visible = false };
+        micMeter.Paint += PaintMeter;
+        Controls.Add(micLabel); Controls.Add(micMeter);
+
         tip = new Label { Text = TipText(false), ForeColor = Sub, Location = new Point(22, 474), AutoSize = true };
         Controls.Add(tip);
 
@@ -230,6 +247,76 @@ public class PhoneCamGui : Form
     CheckBox Check(string t, int x, int y) { return new CheckBox { Text = t, ForeColor = Fg, Location = new Point(x, y), AutoSize = true }; }
 
     void SetStatus(Color c, string s) { lblDot.ForeColor = c; lblStatus.ForeColor = c == Sub ? Sub : Fg; lblStatus.Text = s; }
+
+    // --- mic level meter ---
+    void PaintMeter(object sender, PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        int w = micMeter.ClientSize.Width, h = micMeter.ClientSize.Height;
+        float lvl = micLevel; if (lvl < 0f) lvl = 0f; if (lvl > 1f) lvl = 1f;
+        Color c = lvl < 0.7f ? Green : (lvl < 0.9f ? Amber : Color.FromArgb(226, 96, 96));
+        using (var b = new SolidBrush(c)) g.FillRectangle(b, 0, 0, (int)(w * lvl), h);
+        using (var pen = new Pen(Color.FromArgb(60, 64, 72)))
+        { g.DrawLine(pen, (int)(w * 0.7f), 0, (int)(w * 0.7f), h); g.DrawLine(pen, (int)(w * 0.9f), 0, (int)(w * 0.9f), h); }
+    }
+
+    // --- system tray + start-with-Windows ---
+    const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    const string RunName = "PhoneCam";
+
+    void BuildTray()
+    {
+        var menu = new ContextMenuStrip();
+        var open = new ToolStripMenuItem("Open PhoneCam"); open.Click += (s, e) => ShowFromTray();
+        var miAuto = new ToolStripMenuItem("Start with Windows") { CheckOnClick = true, Checked = AutostartEnabled() };
+        miAuto.Click += (s, e) => SetAutostart(miAuto.Checked);
+        var miTray = new ToolStripMenuItem("Minimize to tray") { CheckOnClick = true, Checked = minimizeToTray };
+        miTray.Click += (s, e) => { minimizeToTray = miTray.Checked; SaveSettings(); };
+        var stop = new ToolStripMenuItem("Stop streaming");
+        stop.Click += (s, e) => { if (running || reconnecting) { manualStop = true; SendPhoneStop(); StopReceiver(); } };
+        var exit = new ToolStripMenuItem("Exit"); exit.Click += (s, e) => Close();
+        menu.Items.Add(open); menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(miAuto); menu.Items.Add(miTray); menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(stop); menu.Items.Add(exit);
+        tray = new NotifyIcon { Icon = SystemIcons.Application, Text = "PhoneCam", Visible = true, ContextMenuStrip = menu };
+        tray.DoubleClick += (s, e) => ShowFromTray();
+    }
+
+    void ShowFromTray() { Show(); WindowState = FormWindowState.Normal; Activate(); }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        if (minimizeToTray && tray != null && WindowState == FormWindowState.Minimized) Hide();
+    }
+
+    bool AutostartEnabled()
+    {
+        try { using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey))
+              return k != null && k.GetValue(RunName) != null; }
+        catch { return false; }
+    }
+
+    void SetAutostart(bool on)
+    {
+        try
+        {
+            using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey, true)
+                        ?? Microsoft.Win32.Registry.CurrentUser.CreateSubKey(RunKey))
+            {
+                if (on) k.SetValue(RunName, "\"" + Application.ExecutablePath + "\" -tray");
+                else k.DeleteValue(RunName, false);
+            }
+            Log("start-with-Windows " + (on ? "enabled" : "disabled"));
+        }
+        catch (Exception ex) { Log("autostart set failed: " + ex.Message); }
+    }
+
+    static bool OnScreen(int x, int y)
+    {
+        var r = SystemInformation.VirtualScreen;
+        return x >= r.Left - 8 && y >= r.Top - 8 && x < r.Right - 40 && y < r.Bottom - 40;
+    }
 
     static string TipText(bool mic)
     {
@@ -416,8 +503,10 @@ public class PhoneCamGui : Form
         // Where to send "stop now": the phone's IP over Wi-Fi, or the forwarded loopback port over USB.
         controlHost = HostOf(url);
         controlPort = usbForwarded ? LocalControlPort : PhoneControlPort;
+        // USB has no QR handshake, so fetch the phone's RTSP secret over the (loopback-only) control port.
+        if (usbForwarded && phoneToken.Length == 0) phoneToken = QueryUsbCreds();
         pairedHost = HostOf(url);
-        videoSeen = false; audioSeen = false; reachIssue = false;
+        videoSeen = false; audioSeen = false; reachIssue = false; authIssue = false; micLevel = 0f;
         var a = new List<string> { url, "--preview" };   // --preview so we can embed the feed
         if (cbFlipH.Checked) a.Add("--flip-h");
         if (cbFlipV.Checked) a.Add("--flip-v");
@@ -433,20 +522,37 @@ public class PhoneCamGui : Form
             if (eq.Length > 0) { a.Add("--eq"); a.Add(eq); }
         }
         else a.Add("--no-audio");
+        // Stream is Basic-auth protected on the phone; present the credentials (blank over USB before the
+        // creds query succeeds / manual-IP, where the phone may not require auth).
+        if (phoneToken.Length > 0) { a.Add("--rtsp-user"); a.Add(RtspUser); a.Add("--rtsp-pass"); a.Add(phoneToken); }
 
         string args = BuildArgs(a);
-        Log("launching receiver: " + args);
+        Log("launching receiver: " + (phoneToken.Length > 0 ? args.Replace(phoneToken, "***") : args));   // never log the password
         var psi = new ProcessStartInfo(receiverExe, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true, StandardErrorEncoding = Encoding.UTF8 };
         recv = new Process { StartInfo = psi };
         recv.ErrorDataReceived += (s, ev) =>
         {
             if (ev.Data == null) return;
-            Log("[recv] " + ev.Data);
-            if (ev.Data.IndexOf("[video]", StringComparison.OrdinalIgnoreCase) >= 0) videoSeen = true;
-            if (ev.Data.IndexOf("[audio] rendering", StringComparison.OrdinalIgnoreCase) >= 0) audioSeen = true;
-            if (ev.Data.IndexOf("reconnect", StringComparison.OrdinalIgnoreCase) >= 0 || ev.Data.IndexOf("unreachable", StringComparison.OrdinalIgnoreCase) >= 0
-                || ev.Data.IndexOf("refused", StringComparison.OrdinalIgnoreCase) >= 0 || ev.Data.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0
-                || ev.Data.IndexOf("failed", StringComparison.OrdinalIgnoreCase) >= 0) reachIssue = true;
+            string d = ev.Data;
+            // Mic-meter feed at ~10 Hz: parse the level, but don't log it (it would flood diagnostics).
+            if (d.StartsWith("[level]"))
+            {
+                float lv; var parts = d.Split(' ');
+                if (parts.Length >= 2 && float.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out lv))
+                {
+                    micLevel = lv;
+                    try { if (micMeter.IsHandleCreated) micMeter.BeginInvoke((Action)(() => micMeter.Invalidate())); } catch { }
+                }
+                return;
+            }
+            Log("[recv] " + (phoneToken.Length > 0 ? d.Replace(phoneToken, "***") : d));   // mask the password if FFmpeg echoes the URL
+            if (d.IndexOf("[video]", StringComparison.OrdinalIgnoreCase) >= 0) videoSeen = true;
+            if (d.IndexOf("[audio] rendering", StringComparison.OrdinalIgnoreCase) >= 0) audioSeen = true;
+            if (d.IndexOf("401", StringComparison.Ordinal) >= 0 || d.IndexOf("Unauthorized", StringComparison.OrdinalIgnoreCase) >= 0)
+            { authIssue = true; reachIssue = true; }
+            if (d.IndexOf("reconnect", StringComparison.OrdinalIgnoreCase) >= 0 || d.IndexOf("unreachable", StringComparison.OrdinalIgnoreCase) >= 0
+                || d.IndexOf("refused", StringComparison.OrdinalIgnoreCase) >= 0 || d.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0
+                || d.IndexOf("failed", StringComparison.OrdinalIgnoreCase) >= 0) reachIssue = true;
         };
         try { recv.Start(); recv.BeginErrorReadLine(); }
         catch (Exception ex) { Log("receiver start FAILED: " + ex.Message); MessageBox.Show("Failed to start receiver: " + ex.Message, "PhoneCam"); StopReceiver(); return; }
@@ -658,6 +764,8 @@ public class PhoneCamGui : Form
         bool hasVideo = videoSeen || embedded != IntPtr.Zero;
         // Back to a live feed → this URL is good; refill the reconnect budget for the next blip.
         if (hasVideo || audioSeen) { wentLive = true; reconnectAttempts = 0; }
+        bool micActive = running && audioSeen;
+        if (micMeter.Visible != micActive) { micMeter.Visible = micActive; micLabel.Visible = micActive; }
         if (hasVideo) SetStatus(Green, "Live — select “PhoneCam Camera” in your app");
         else if (audioSeen)
         {
@@ -665,6 +773,8 @@ public class PhoneCamGui : Form
             SetStatus(Green, "Live (mic) — pick “CABLE Output” as your microphone");
             if (embedded == IntPtr.Zero) { previewHint.Text = "Microphone only — no video."; previewHint.Visible = true; }
         }
+        else if (authIssue)
+            SetStatus(Amber, "Phone requires pairing — connect with the QR or a saved device, not a typed IP.");
         else if (reachIssue)
             SetStatus(Amber, rbUsb.Checked ? "Waiting for the phone (press Start in the app)…"
                 : "Can't reach the phone" + (pairedHost != null ? " at " + pairedHost : "") + " — same Wi-Fi? VPN off? Firewall?");
@@ -698,12 +808,36 @@ public class PhoneCamGui : Form
         else ThreadPool.QueueUserWorkItem(delegate { send(); });
     }
 
+    /// <summary>Over USB, ask the phone (via the loopback-forwarded control port) for its RTSP secret so
+    /// we can authenticate the pull. The phone only answers this on loopback. "" if unavailable.</summary>
+    string QueryUsbCreds()
+    {
+        try
+        {
+            using (var c = new TcpClient())
+            {
+                var ar = c.BeginConnect("127.0.0.1", LocalControlPort, null, null);
+                if (!ar.AsyncWaitHandle.WaitOne(700)) return "";
+                c.EndConnect(ar);
+                c.ReceiveTimeout = 700;
+                var ns = c.GetStream();
+                var q = Encoding.UTF8.GetBytes("PCAM-CREDS?\n");
+                ns.Write(q, 0, q.Length); ns.Flush();
+                string line = new StreamReader(ns, Encoding.UTF8).ReadLine();
+                return (line ?? "").Trim();
+            }
+        }
+        catch { return ""; }
+    }
+
     void StopReceiver()
     {
         if (running) Log("stopped");
         timer.Stop();
         reconnecting = false;
         embedded = IntPtr.Zero;
+        micLevel = 0f;
+        if (micMeter != null) { micMeter.Visible = false; micLabel.Visible = false; }
         try { if (pairListener != null) { pairListener.Stop(); pairListener = null; } } catch { }
         try { if (recv != null && !recv.HasExited) recv.Kill(); } catch { }
         recv = null;
@@ -815,6 +949,12 @@ public class PhoneCamGui : Form
                     case "eqcustom": customEq = kv[1]; break;
                     case "eq": { int ei; if (int.TryParse(kv[1], out ei) && ei >= 0 && ei < cbEq.Items.Count) { suppressEqDialog = true; cbEq.SelectedIndex = ei; suppressEqDialog = false; prevEqIndex = ei; } } break;
                     case "device": { var t = kv[1].Split('\t'); if (t.Length >= 2 && t[0].Length > 0 && t[1].Length > 0) devices.Add(new[] { t[0], t[1], t.Length > 2 ? t[2] : "" }); } break;
+                    case "tray": minimizeToTray = kv[1] == "1"; break;
+                    case "winpos": {
+                        var xy = kv[1].Split(','); int wx, wy;
+                        if (xy.Length == 2 && int.TryParse(xy[0], out wx) && int.TryParse(xy[1], out wy) && OnScreen(wx, wy))
+                        { StartPosition = FormStartPosition.Manual; Location = new Point(wx, wy); }
+                    } break;
                 }
             }
         } catch { }
@@ -835,7 +975,10 @@ public class PhoneCamGui : Form
                 "boost=" + cbBoost.SelectedIndex,
                 "eqcustom=" + customEq,
                 "eq=" + cbEq.SelectedIndex,
+                "tray=" + (minimizeToTray ? "1" : "0"),
             };
+            var wl = (WindowState == FormWindowState.Normal ? Location : RestoreBounds.Location);
+            lines.Add("winpos=" + wl.X + "," + wl.Y);
             foreach (var d in devices) lines.Add("device=" + d[0] + "\t" + d[1] + "\t" + (d.Length > 2 ? d[2] : ""));
             File.WriteAllLines(settingsPath, lines);
         } catch { }
