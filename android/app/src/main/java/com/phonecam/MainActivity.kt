@@ -120,7 +120,7 @@ class MainActivity : AppCompatActivity() {
                 ui.post { pairingNote = "Couldn't start the camera stream — try a lower Quality." }
                 return@Thread
             }
-            val ok = PcLink.announce(target, url, mode, deviceName())
+            val ok = PcLink.announce(target, url, mode, deviceName(), StreamService.controlToken(this))
             ui.post {
                 pairingNote = if (ok) null
                 else "Reached out to the PC at ${target.host} but it didn't answer — is PhoneCam open on the PC, on the same Wi‑Fi, with its firewall allowing it?"

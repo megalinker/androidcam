@@ -86,7 +86,7 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.4.18";
+    const string Version = "0.4.19";
     const int LocalPort = 18554, PhonePort = 8554;
     const int PhoneControlPort = 8555, LocalControlPort = 18555;   // "stop the phone now" channel (USB uses the forward)
     bool usbForwarded = false, running = false;
@@ -96,6 +96,7 @@ public class PhoneCamGui : Form
     string lastUrl;              // the phone's rtsp URL we're (re)connecting to
     bool lastUseMic;             // the mic choice for that session, so reconnects match
     string controlHost; int controlPort = PhoneControlPort;   // where to send "stop the phone now"
+    string phoneToken = "";      // the phone's stop-authorization token for this session (empty over USB/manual-IP)
     bool manualStop = false;     // true while the user (or app close) is deliberately stopping — no reconnect
     bool reconnecting = false;   // waiting out the delay between reconnect attempts
     bool wentLive = false;       // did this URL ever produce a live feed? (tunes the give-up message)
@@ -116,6 +117,7 @@ public class PhoneCamGui : Form
     static readonly Regex reTok = new Regex("\"tok\"\\s*:\\s*\"([^\"]*)\"");
     static readonly Regex reUrl = new Regex("\"url\"\\s*:\\s*\"([^\"]*)\"");
     static readonly Regex reName = new Regex("\"name\"\\s*:\\s*\"([^\"]*)\"");
+    static readonly Regex reCtok = new Regex("\"ctok\"\\s*:\\s*\"([^\"]*)\"");
 
     public PhoneCamGui()
     {
@@ -379,7 +381,8 @@ public class PhoneCamGui : Form
         if (!PrepareMic(ref useMic)) return;
 
         // Fresh user-initiated start: clear any leftover reconnect/stop state.
-        manualStop = false; reconnecting = false; wentLive = false; reconnectAttempts = 0;
+        // No token for USB/manual-IP (no handshake) — USB stops are authorized by loopback on the phone.
+        manualStop = false; reconnecting = false; wentLive = false; reconnectAttempts = 0; phoneToken = "";
         Log("Start: mode=" + (rbUsb.Checked ? "usb" : rbQr.Checked ? "qr" : "wifi-ip") + " mic=" + useMic);
         // Wi-Fi QR pairing: show a code, let the phone scan it and announce its URL to us.
         if (rbQr.Checked) { StartQrPairing(useMic); return; }
@@ -492,7 +495,7 @@ public class PhoneCamGui : Form
                     string peer = "?"; try { peer = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString(); } catch { }
                     string line = new StreamReader(ns, Encoding.UTF8).ReadLine() ?? "";
                     Log("pairing: connection from " + peer + " -> " + (line.Length > 160 ? line.Substring(0, 160) : line));
-                    var mt = reTok.Match(line); var mu = reUrl.Match(line); var mn = reName.Match(line);
+                    var mt = reTok.Match(line); var mu = reUrl.Match(line); var mn = reName.Match(line); var mc = reCtok.Match(line);
                     if (mt.Success && mt.Groups[1].Value == pairToken && mu.Success)
                     {
                         try { var ok = Encoding.UTF8.GetBytes("OK\n"); ns.Write(ok, 0, ok.Length); } catch { }
@@ -501,8 +504,9 @@ public class PhoneCamGui : Form
                         // with "Failed to resolve hostname \".
                         string url = mu.Groups[1].Value.Replace("\\/", "/");
                         string name = mn.Success ? mn.Groups[1].Value.Replace("\\/", "/") : "";
+                        string ctok = mc.Success ? mc.Groups[1].Value : "";
                         Log("pairing OK: phone stream = " + url + (name.Length > 0 ? " (" + name + ")" : ""));
-                        BeginInvoke((Action)(() => OnPaired(url, name)));
+                        BeginInvoke((Action)(() => OnPaired(url, name, ctok)));
                     }
                     else { Log("pairing: token mismatch / bad payload from " + peer); BeginInvoke((Action)(() => SetStatus(Amber, "A device tried to pair but the code didn't match."))); }
                 }
@@ -512,12 +516,13 @@ public class PhoneCamGui : Form
         pairThread.Start();
     }
 
-    void OnPaired(string url, string name)
+    void OnPaired(string url, string name, string token)
     {
         try { if (pairListener != null) { pairListener.Stop(); pairListener = null; } } catch { }
         qrLabel.Visible = false; qrBox.Visible = false;
         if (qrBox.Image != null) { var img = qrBox.Image; qrBox.Image = null; img.Dispose(); }
-        SaveDevice(name, url);   // remember this phone so next time you can skip the QR
+        SaveDevice(name, url, token);   // remember this phone (+ its stop token) so next time you can skip the QR
+        phoneToken = token;             // authorize a later Stop of this session
         previewHint.Text = "Connecting…"; SetStatus(Amber, "Phone paired (" + HostOf(url) + ") — connecting…");
         manualStop = false; wentLive = false;
         StartReceiverWithUrl(url, pendingUseMic);
@@ -671,6 +676,8 @@ public class PhoneCamGui : Form
     {
         string host = controlHost; int port = controlPort;
         if (string.IsNullOrEmpty(host)) return;
+        // Authenticated over Wi-Fi (token from pairing / saved device); bare over USB (phone trusts loopback).
+        string cmd = phoneToken.Length > 0 ? "PCAM-STOP:" + phoneToken + "\n" : "PCAM-STOP\n";
         Log("sending stop to phone " + host + ":" + port);
         Action send = delegate
         {
@@ -681,7 +688,7 @@ public class PhoneCamGui : Form
                     var ar = c.BeginConnect(host, port, null, null);
                     if (!ar.AsyncWaitHandle.WaitOne(1500)) return;   // phone unreachable or too old — give up quietly
                     c.EndConnect(ar);
-                    var b = Encoding.UTF8.GetBytes("PCAM-STOP\n");
+                    var b = Encoding.UTF8.GetBytes(cmd);
                     var ns = c.GetStream(); ns.Write(b, 0, b.Length); ns.Flush();
                 }
             }
@@ -717,13 +724,13 @@ public class PhoneCamGui : Form
     // --- saved devices ---
 
     /// <summary>Remember (or refresh) a phone as a named device for one-click reconnect. De-dupes by name and URL.</summary>
-    void SaveDevice(string name, string url)
+    void SaveDevice(string name, string url, string token)
     {
         if (string.IsNullOrEmpty(url)) return;
         if (string.IsNullOrEmpty(name)) name = HostOf(url);
         name = name.Replace('\t', ' ').Trim();
         devices.RemoveAll(d => d[0] == name || d[1] == url);
-        devices.Insert(0, new[] { name, url });
+        devices.Insert(0, new[] { name, url, token ?? "" });
         while (devices.Count > 8) devices.RemoveAt(devices.Count - 1);
         SaveSettings();
         if (!running && !reconnecting) RebuildDevices();
@@ -737,13 +744,14 @@ public class PhoneCamGui : Form
     }
 
     /// <summary>Connect straight to a saved phone's URL — no QR. Reuses the current Options (mic/EQ/flip).</summary>
-    void ConnectToDevice(string url)
+    void ConnectToDevice(string url, string token)
     {
         if (receiverExe == null || running || reconnecting) return;
         bool useMic = cbMic.Checked;
         if (!PrepareMic(ref useMic)) return;
         manualStop = false; reconnecting = false; wentLive = false; reconnectAttempts = 0;
         usbForwarded = false;   // saved devices are always Wi-Fi (a LAN rtsp URL), never the USB tunnel
+        phoneToken = token ?? "";   // the saved stop token authorizes stopping this phone
         Log("connect to saved device: " + url + " mic=" + useMic);
         previewHint.Text = "Connecting…";
         SetStatus(Amber, "Connecting to " + HostOf(url) + "…");
@@ -768,7 +776,7 @@ public class PhoneCamGui : Form
         int y = 44, rowW = devicesPanel.ClientSize.Width - 24;
         foreach (var d in devices)
         {
-            string name = d[0], url = d[1];
+            string name = d[0], url = d[1], token = d.Length > 2 ? d[2] : "";
             var row = new Panel { Location = new Point(12, y), Size = new Size(rowW, 50), BackColor = Card };
             row.Controls.Add(new Label { Text = name, ForeColor = Fg, Font = new Font("Segoe UI Semibold", 10f),
                 Location = new Point(12, 7), AutoSize = true, BackColor = Card });
@@ -777,7 +785,7 @@ public class PhoneCamGui : Form
             var conn = new Button { Text = "Connect", Size = new Size(84, 30), Location = new Point(rowW - 84 - 44, 10),
                 FlatStyle = FlatStyle.Flat, BackColor = Accent, ForeColor = Color.White };
             conn.FlatAppearance.BorderSize = 0;
-            conn.Click += (s, e) => ConnectToDevice(url);
+            conn.Click += (s, e) => ConnectToDevice(url, token);
             var forget = new Button { Text = "✕", Size = new Size(30, 30), Location = new Point(rowW - 36, 10),
                 FlatStyle = FlatStyle.Flat, BackColor = Card, ForeColor = Sub };
             forget.FlatAppearance.BorderColor = Line;
@@ -806,7 +814,7 @@ public class PhoneCamGui : Form
                     case "boost": { int bi; if (int.TryParse(kv[1], out bi) && bi >= 0 && bi < BoostDb.Length) cbBoost.SelectedIndex = bi; } break;
                     case "eqcustom": customEq = kv[1]; break;
                     case "eq": { int ei; if (int.TryParse(kv[1], out ei) && ei >= 0 && ei < cbEq.Items.Count) { suppressEqDialog = true; cbEq.SelectedIndex = ei; suppressEqDialog = false; prevEqIndex = ei; } } break;
-                    case "device": { var t = kv[1].Split('\t'); if (t.Length == 2 && t[0].Length > 0 && t[1].Length > 0) devices.Add(new[] { t[0], t[1] }); } break;
+                    case "device": { var t = kv[1].Split('\t'); if (t.Length >= 2 && t[0].Length > 0 && t[1].Length > 0) devices.Add(new[] { t[0], t[1], t.Length > 2 ? t[2] : "" }); } break;
                 }
             }
         } catch { }
@@ -828,7 +836,7 @@ public class PhoneCamGui : Form
                 "eqcustom=" + customEq,
                 "eq=" + cbEq.SelectedIndex,
             };
-            foreach (var d in devices) lines.Add("device=" + d[0] + "\t" + d[1]);
+            foreach (var d in devices) lines.Add("device=" + d[0] + "\t" + d[1] + "\t" + (d.Length > 2 ? d[2] : ""));
             File.WriteAllLines(settingsPath, lines);
         } catch { }
     }

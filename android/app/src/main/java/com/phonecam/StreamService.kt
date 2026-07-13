@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
@@ -97,6 +98,20 @@ class StreamService : Service(), ConnectChecker {
 
         @Volatile var streamUrl: String? = null
             private set
+
+        /**
+         * A stable per-install secret the PC must present to stop us over Wi-Fi. Created once and kept
+         * in prefs, so it survives restarts — that's what lets a saved-device reconnect (which never
+         * re-pairs) still carry a valid stop token. Sent to the PC in the pairing handshake.
+         */
+        @Synchronized   // announce (worker thread) and the listener (main) can both ask at once — create once
+        fun controlToken(ctx: Context): String {
+            val prefs = ctx.getSharedPreferences("phonecam", Context.MODE_PRIVATE)
+            prefs.getString("controlToken", null)?.let { if (it.isNotEmpty()) return it }
+            val t = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 16)
+            prefs.edit().putString("controlToken", t).apply()
+            return t
+        }
 
         // True while a PC (RTSP client) is pulling the stream. Drives the "PC connected ✓" UI.
         @Volatile var clientConnected: Boolean = false
@@ -256,6 +271,7 @@ class StreamService : Service(), ConnectChecker {
     // unblocks accept() and ends the loop. Any bind/read failure just degrades to the old behaviour
     // (the phone keeps waiting), so this is best-effort and never crashes the service.
     private fun startControlListener() {
+        val myToken = controlToken(this)
         Thread {
             val srv = try {
                 java.net.ServerSocket().apply { reuseAddress = true; bind(java.net.InetSocketAddress(CONTROL_PORT)) }
@@ -270,9 +286,15 @@ class StreamService : Service(), ConnectChecker {
                     try {
                         client.soTimeout = 3000
                         val line = client.getInputStream().bufferedReader(Charsets.UTF_8).readLine()?.trim()
-                        if (line == CONTROL_STOP) {
-                            Log.i(TAG, "PC sent stop — stopping stream immediately")
+                        // Authorize: a matching token from anywhere, OR a bare stop over loopback — which
+                        // can only be the USB adb-forward path (already trusted via USB debugging).
+                        val fromLoopback = client.inetAddress?.isLoopbackAddress == true
+                        val authorized = line == "$CONTROL_STOP:$myToken" || (fromLoopback && line == CONTROL_STOP)
+                        if (authorized) {
+                            Log.i(TAG, "authorized stop from PC — stopping stream immediately")
                             idleHandler.post { stopStreaming() }
+                        } else if (line != null && line.startsWith(CONTROL_STOP)) {
+                            Log.w(TAG, "ignored unauthorized stop from ${client.inetAddress}")
                         }
                     } catch (e: Exception) {
                         Log.w(TAG, "control read failed", e)
