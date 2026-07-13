@@ -299,7 +299,9 @@ class StreamService : Service(), ConnectChecker {
                 stopSelf(); return
             }
 
-            s.startStream("srt://$srtHost:$srtPort")   // connect out to the PC and push (encrypted)
+            // RootEncoder's SRT parser requires a /streamid path (srt://ip:port/streamid). The PC's
+            // FFmpeg listener doesn't filter on it, so any non-empty id works.
+            s.startStream("srt://$srtHost:$srtPort/phonecam")   // connect out to the PC and push (encrypted)
             srtStream = s
             streamUrl = "Encrypted → $srtHost"
             isRunning = true
