@@ -53,7 +53,11 @@ The SDP is too big and dynamic for the QR alone, so the QR only **bootstraps**:
    listener, and shows a QR: `PCAM3:<pcIP>:<sigPort>:<pairSecret>`.
 2. Phone scans, connects to the TCP listener, and the two exchange **SDP
    offer/answer** (containing DTLS fingerprints and LAN host ICE candidates) over
-   that TCP channel, authenticated by `pairSecret`.
+   that TCP channel, authenticated by `pairSecret`. **The PC is the WebRTC
+   *offerer* with recvonly tracks (+ `RtcpReceivingSession`); the phone *answers*
+   sendonly.** (Proven necessary in Phase 1: a sendonly offer to an unprepared
+   answerer is rejected with `m=… 0`/port 0 and the track never opens — every
+   working libdatachannel media example has the receiver offer.)
 3. WebRTC media (DTLS‑SRTP/UDP) establishes LAN‑direct. The exchanged DTLS
    fingerprints ARE the pinned identity; `pairSecret` gates the exchange (MITM
    resistance without a CA).
@@ -72,8 +76,9 @@ This reuses the pairing pattern we already have (PCAM1/PCAM2), just carrying SDP
 
 | # | Deliverable | Who can test |
 |---|---|---|
-| 0 | Deps + build: libdatachannel in the Windows CMake/CI build; WebRTC SDK gradle dep on Android. Both compile. | Me (PC build) / CI (APK) |
-| 1 | Signaling: `PCAM3` QR + TCP SDP offer/answer exchange, `pairSecret`‑gated, on both ends. | Me (loopback) |
+| 0 | ✅ DONE. Deps + build: libdatachannel (`WITH_WEBRTC`) links into the receiver; WebRTC SDK gradle dep on Android — branch APK build green. | Me / CI |
+| 1a | ✅ DONE. DTLS‑SRTP media loopback (`webrtc_loopback.exe`): two peers, LAN host candidates, Opus RTP flows (45/50). Biggest transport de‑risk. | Me |
+| 1b | Signaling: `PCAM3` QR + TCP SDP offer/answer exchange, `pairSecret`‑gated, on both ends. | Me (loopback) |
 | 2 | PC receiver: libdatachannel peer accepts an **Opus audio** track → FFmpeg Opus decode → existing WASAPI/CABLE sink. Validate against a browser/Pion test sender. | **Me** (browser ↔ PC) |
 | 3 | Phone sender: WebRTC Android peer captures mic → Opus → audio track; connects via the signaling channel. | Tester device |
 | 4 | Mic‑only end‑to‑end + measure latency & battery on the tester's phone vs SRT. Go/no‑go on the numbers. | Tester device |
@@ -104,6 +109,17 @@ quality, room, Wi‑Fi), SRT first (baseline), WebRTC after.
 
 Capture the **SRT baseline before touching the media path**, so "before" is
 locked in.
+
+## Build notes (PC / vcpkg)
+
+- Required feature set: **`libdatachannel[core,srtp,ws]`** plus **`libsrtp[openssl]`**.
+  Defaults omit both SRTP and OpenSSL — without SRTP media tracks are disabled;
+  without OpenSSL, SRTP falls back to a crypto path that **fast‑fails** (0xC0000409)
+  during keying. With OpenSSL the log shows "Deriving SRTP keying material (OpenSSL)".
+- libSRTP 2.8.0 won't build under MSVC with warnings‑as‑errors (`C4214`). Fixed via
+  the vcpkg **overlay port** at `windows/vcpkg-overlays/libsrtp` (adds
+  `-DENABLE_WARNINGS_AS_ERRORS=OFF`). CI must pass `--overlay-ports` to that dir.
+- Configure the WebRTC receiver with `-DWITH_WEBRTC=ON -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/…/vcpkg.cmake`.
 
 ## Risks
 
