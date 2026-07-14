@@ -67,8 +67,8 @@ public class PhoneCamGui : Form
     RadioButton rbUsb, rbWifi, rbQr;
     LinkLabel linkIp, linkDiag;
     TextBox tbIp;
-    CheckBox cbMic, cbFlipH, cbFlipV, cbEncrypt;
-    ComboBox cbBoost, cbEq;
+    CheckBox cbMic, cbFlipH, cbFlipV;
+    ComboBox cbBoost, cbEq, cbTransport;   // cbTransport: Standard RTSP / Encrypted SRT / Low-latency WebRTC (Wi-Fi QR only)
     string customEq = "";        // user-defined band list ("type:f:q:db;...") from the EQ editor
     int prevEqIndex = 0;         // revert target if the custom editor is cancelled
     bool suppressEqDialog = false;   // don't pop the editor when we set the EQ index programmatically
@@ -92,12 +92,15 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.4.26";
+    const string Version = "0.5.0-webrtc.1";
     const string RtspUser = "phonecam";   // Basic-auth username the phone expects
     const int LocalPort = 18554, PhonePort = 8554;
     const int PhoneControlPort = 8555, LocalControlPort = 18555;   // "stop the phone now" channel (USB uses the forward)
     const int SrtPort = 8890;    // UDP port the PC's SRT listener binds in encrypted mode
+    const int WebrtcSigPort = 8891;   // TCP port the PC's WebRTC PCAM3 signaling listener binds
     bool srtMode = false;        // this session is an encrypted SRT listen (phone pushes to us)
+    bool webrtcMode = false;     // this session is a WebRTC (PCAM3) signaling + DTLS-SRTP receive (mic-only)
+    string webrtcSecret = "";    // the pairSecret for this WebRTC session (kept out of logs)
     string srtPass = "";         // the SRT passphrase for this session (kept out of logs)
     string srtStablePass = "";   // persisted passphrase, so a phone that saved us can reconnect later
     DateTime srtWaitSince = DateTime.MinValue;   // when the encrypted QR went up (to time the VPN hint)
@@ -203,10 +206,13 @@ public class PhoneCamGui : Form
         cbBoost.Enabled = cbMic.Checked; cbEq.Enabled = cbMic.Checked;
         cbFlipH = Check("Flip left / right", 22, 278);
         cbFlipV = Check("Flip up / down", 22, 304);
-        // Encrypted = SRT (UDP, AES, low-latency). It fully supersedes the old "lower latency" RTSP-UDP
-        // toggle, so that one's gone; unchecked = plain RTSP over TCP (the reliable, VPN-friendly default).
-        cbEncrypt = Check("Encrypted (🔒 Wi-Fi QR only)", 22, 330);
-        Controls.Add(cbMic); Controls.Add(cbBoost); Controls.Add(cbEq); Controls.Add(cbFlipH); Controls.Add(cbFlipV); Controls.Add(cbEncrypt);
+        // Transport (Wi-Fi QR only): Standard RTSP (reliable, VPN-friendly), Encrypted SRT (UDP/AES),
+        // or Low-latency WebRTC (DTLS-SRTP, mic-only beta). USB/manual-IP always use plain RTSP.
+        Controls.Add(new Label { Text = "Wi-Fi transport", ForeColor = Sub, Font = new Font("Segoe UI", 8.25f), Location = new Point(24, 328), AutoSize = true });
+        cbTransport = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(112, 325), Width = 134, FlatStyle = FlatStyle.Flat, BackColor = Card, ForeColor = Fg };
+        cbTransport.Items.AddRange(new object[] { "Standard", "Encrypted 🔒", "Low-latency ⚡" });
+        cbTransport.SelectedIndex = 0;
+        Controls.Add(cbMic); Controls.Add(cbBoost); Controls.Add(cbEq); Controls.Add(cbFlipH); Controls.Add(cbFlipV); Controls.Add(cbTransport);
 
         btnStart = new Button { Text = "Start", Location = new Point(22, 362), Size = new Size(224, 40), FlatStyle = FlatStyle.Flat, BackColor = Accent, ForeColor = Color.White, Font = new Font("Segoe UI Semibold", 11f) };
         btnStart.FlatAppearance.BorderSize = 0;
@@ -308,7 +314,7 @@ public class PhoneCamGui : Form
     void StartAutoListen()
     {
         if (receiverExe == null || running || reconnecting) return;
-        rbQr.Checked = true; cbEncrypt.Checked = true;
+        rbQr.Checked = true; cbTransport.SelectedIndex = 1;   // encrypted SRT
         StartReceiver();
     }
 
@@ -359,7 +365,7 @@ public class PhoneCamGui : Form
     {
         rbUsb.Enabled = on; rbQr.Enabled = on; rbWifi.Enabled = on; linkIp.Enabled = on;
         tbIp.Enabled = on && rbWifi.Checked;
-        cbMic.Enabled = on; cbFlipH.Enabled = on; cbFlipV.Enabled = on; cbEncrypt.Enabled = on;
+        cbMic.Enabled = on; cbFlipH.Enabled = on; cbFlipV.Enabled = on; cbTransport.Enabled = on;
         cbBoost.Enabled = on && cbMic.Checked;
         cbEq.Enabled = on && cbMic.Checked;
     }
@@ -497,11 +503,12 @@ public class PhoneCamGui : Form
 
         // Fresh user-initiated start: clear any leftover reconnect/stop state.
         // No token for USB/manual-IP (no handshake) — USB stops are authorized by loopback on the phone.
-        manualStop = false; reconnecting = false; wentLive = false; reconnectAttempts = 0; phoneToken = ""; srtMode = false;
-        Log("Start: mode=" + (rbUsb.Checked ? "usb" : rbQr.Checked ? "qr" : "wifi-ip") + " mic=" + useMic + " enc=" + (rbQr.Checked && cbEncrypt.Checked));
-        // Encrypted Wi-Fi: we become the SRT listener and the phone pushes to us (AES). QR carries our endpoint.
-        if (rbQr.Checked && cbEncrypt.Checked) { StartSrtPairing(useMic); return; }
-        // Wi-Fi QR pairing: show a code, let the phone scan it and announce its URL to us.
+        manualStop = false; reconnecting = false; wentLive = false; reconnectAttempts = 0; phoneToken = ""; srtMode = false; webrtcMode = false;
+        int transport = rbQr.Checked ? cbTransport.SelectedIndex : 0;   // transport applies to Wi-Fi QR only
+        Log("Start: mode=" + (rbUsb.Checked ? "usb" : rbQr.Checked ? "qr" : "wifi-ip") + " mic=" + useMic + " transport=" + transport);
+        // Wi-Fi QR: Low-latency (WebRTC, mic-only), Encrypted (SRT listener), or Standard (RTSP announce-back).
+        if (transport == 2) { StartWebrtcPairing(); return; }
+        if (transport == 1) { StartSrtPairing(useMic); return; }
         if (rbQr.Checked) { StartQrPairing(useMic); return; }
 
         string url;
@@ -554,6 +561,14 @@ public class PhoneCamGui : Form
         // creds query succeeds / manual-IP, where the phone may not require auth).
         if (phoneToken.Length > 0) { a.Add("--rtsp-user"); a.Add(RtspUser); a.Add("--rtsp-pass"); a.Add(phoneToken); }
 
+        RunReceiverProcess(a, useMic);
+    }
+
+    /// <summary>Shared receiver.exe launch: start the process, wire its stderr (mic meter + live/drop
+    /// detection), and flip the UI into the running state. Callers build the arg list and set the
+    /// session fields (lastUrl / controlHost / srtMode / webrtcMode) beforehand.</summary>
+    void RunReceiverProcess(List<string> a, bool useMic)
+    {
         string args = BuildArgs(a);
         Log("launching receiver: " + Redact(args));   // never log the RTSP password / SRT passphrase
         var psi = new ProcessStartInfo(receiverExe, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true, StandardErrorEncoding = Encoding.UTF8 };
@@ -578,6 +593,8 @@ public class PhoneCamGui : Form
             if (d.IndexOf("[audio] rendering", StringComparison.OrdinalIgnoreCase) >= 0) { audioSeen = true; streamDropped = false; }
             // The receiver's reconnect loop prints "[net] stream ended/unreachable…" when the phone's feed drops.
             if (d.IndexOf("[net]", StringComparison.OrdinalIgnoreCase) >= 0) streamDropped = true;
+            // WebRTC: the phone leaving ends the session; the receiver re-listens (like SRT).
+            if (d.IndexOf("session ended", StringComparison.OrdinalIgnoreCase) >= 0) streamDropped = true;
             if (d.IndexOf("401", StringComparison.Ordinal) >= 0 || d.IndexOf("Unauthorized", StringComparison.OrdinalIgnoreCase) >= 0)
             { authIssue = true; reachIssue = true; }
             if (d.IndexOf("reconnect", StringComparison.OrdinalIgnoreCase) >= 0 || d.IndexOf("unreachable", StringComparison.OrdinalIgnoreCase) >= 0
@@ -589,7 +606,7 @@ public class PhoneCamGui : Form
 
         running = true; embedded = IntPtr.Zero;
         devicesPanel.Visible = false;
-        if (!srtMode) previewHint.Visible = true;   // in SRT mode the QR stays up until the phone connects
+        if (!srtMode && !webrtcMode) previewHint.Visible = true;   // SRT/WebRTC keep the QR up until the phone connects
         tip.Text = TipText(useMic);
         SetInputsEnabled(false);
         btnStart.Text = "Stop"; btnStart.BackColor = Color.FromArgb(70, 74, 82);
@@ -616,6 +633,46 @@ public class PhoneCamGui : Form
         srtWaitSince = DateTime.Now; srtHint.Visible = false;
         SetStatus(Amber, "Scan the QR (encrypted) with the PhoneCam app…");
         StartReceiverWithUrl(listenUrl, useMic);   // launches the listener + sets running/Stop/timer
+    }
+
+    /// <summary>WebRTC mode (mic-only, Phase 3 of docs/webrtc-migration.md): run receiver.exe as a PCAM3
+    /// signaling *offerer* and show a QR the phone answers. The phone captures mic → Opus → DTLS-SRTP
+    /// straight into the CABLE virtual mic — lower latency + authenticated encryption, no video.</summary>
+    void StartWebrtcPairing()
+    {
+        string ip = LocalIPv4();
+        if (ip == null) { MessageBox.Show("Couldn't determine this PC's Wi-Fi address. Use USB, or pick a different transport.", "PhoneCam"); return; }
+        webrtcMode = true;
+        // Reuse the stable persisted secret so a phone that saved us can reconnect without re-scanning.
+        if (srtStablePass.Length < 10) { srtStablePass = Guid.NewGuid().ToString("N").Substring(0, 24); SaveSettings(); }
+        webrtcSecret = srtStablePass;
+        string payload = "PCAM3:" + ip + ":" + WebrtcSigPort + ":" + webrtcSecret;
+        Log("WebRTC: signaling (offerer) on tcp/" + WebrtcSigPort + " — waiting for the phone to scan");
+        try { qrBox.Image = MakeQr(payload); }
+        catch (Exception ex) { MessageBox.Show("Couldn't render the QR: " + ex.Message, "PhoneCam"); webrtcMode = false; return; }
+        qrLabel.Text = "Scan this with the PhoneCam app\n(⚡ low-latency mic)";
+        qrLabel.Visible = true; qrBox.Visible = true;
+        srtWaitSince = DateTime.Now; srtHint.Visible = false;
+        SetStatus(Amber, "Scan the QR (low-latency mic) with the PhoneCam app…");
+        StartWebrtcReceiver();
+    }
+
+    /// <summary>Launch (or relaunch, for auto-reconnect) receiver.exe in --webrtc mode.</summary>
+    void StartWebrtcReceiver()
+    {
+        lastUrl = "webrtc"; lastUseMic = true; reconnecting = false;   // sentinel so OnTick relaunches (not stop)
+        controlHost = ""; controlPort = PhoneControlPort;              // no stop channel (phone stops when we do)
+        pairedHost = ""; phoneToken = "";
+        videoSeen = false; audioSeen = false; reachIssue = false; authIssue = false; micLevel = 0f;
+        var a = new List<string> {
+            "--webrtc", "--sig-port", WebrtcSigPort.ToString(), "--sig-secret", webrtcSecret,
+            "--audio-device", "CABLE Input"
+        };
+        int bi = cbBoost.SelectedIndex; if (bi < 0 || bi >= BoostDb.Length) bi = 2;
+        if (BoostDb[bi] != 0) { a.Add("--mic-gain"); a.Add(BoostDb[bi].ToString()); }
+        string eq = SelectedEq();
+        if (eq.Length > 0) { a.Add("--eq"); a.Add(eq); }
+        RunReceiverProcess(a, true);
     }
 
     /// <summary>Show a pairing QR and wait (off the UI thread) for the phone to announce its URL.</summary>
@@ -773,7 +830,7 @@ public class PhoneCamGui : Form
             }
             reconnectAttempts++;
             SetStatus(Amber, "Reconnecting… (" + reconnectAttempts + ")");
-            StartReceiverWithUrl(lastUrl, lastUseMic);
+            if (webrtcMode) StartWebrtcReceiver(); else StartReceiverWithUrl(lastUrl, lastUseMic);
             return;
         }
 
@@ -820,7 +877,7 @@ public class PhoneCamGui : Form
         if ((hasVideo || audioSeen) && qrBox.Visible)
         { qrLabel.Visible = false; qrBox.Visible = false; if (qrBox.Image != null) { var i = qrBox.Image; qrBox.Image = null; i.Dispose(); } }
         // Encrypted connection stalling? Surface the VPN "allow LAN" hint (the usual culprit).
-        bool srtStalled = srtMode && !hasVideo && !audioSeen && (DateTime.Now - srtWaitSince).TotalSeconds > 12;
+        bool srtStalled = (srtMode || webrtcMode) && !hasVideo && !audioSeen && (DateTime.Now - srtWaitSince).TotalSeconds > 12;
         if (srtHint.Visible != srtStalled) srtHint.Visible = srtStalled;
         // Meter is hidden while dropped so a frozen last-value bar can't look "live". Empty it too.
         bool micActive = running && audioSeen && !streamDropped;
@@ -828,8 +885,8 @@ public class PhoneCamGui : Form
         if (streamDropped && micLevel != 0f) { micLevel = 0f; }
         // The phone stopping mid-session leaves a frozen preview, so this must win over the "Live" checks.
         if (streamDropped)
-            // In SRT mode the receiver keeps listening, so a drop just means "ready for the phone to reconnect".
-            SetStatus(Amber, srtMode ? "Phone disconnected — ready to reconnect (tap “Reconnect” on the phone)."
+            // In SRT/WebRTC mode the receiver keeps listening, so a drop just means "ready for the phone to reconnect".
+            SetStatus(Amber, (srtMode || webrtcMode) ? "Phone disconnected — ready to reconnect (tap “Reconnect” on the phone)."
                                      : "Phone stopped — press Stop, or restart it on the phone.");
         else if (hasVideo) SetStatus(Green, "Live — camera ready ✓");   // detail (“pick PhoneCam Camera”) is in the tip below
         else if (audioSeen)
@@ -838,8 +895,9 @@ public class PhoneCamGui : Form
             SetStatus(Green, "Live — microphone ready ✓");
             if (embedded == IntPtr.Zero) { previewHint.Text = "Microphone only — no video."; previewHint.Visible = true; }
         }
-        else if (srtMode)
-            SetStatus(Amber, "Waiting for the phone to connect (encrypted)…");
+        else if (srtMode || webrtcMode)
+            SetStatus(Amber, webrtcMode ? "Waiting for the phone to connect (low-latency mic)…"
+                                        : "Waiting for the phone to connect (encrypted)…");
         else if (authIssue)
             SetStatus(Amber, "Phone requires pairing — connect with the QR or a saved device, not a typed IP.");
         else if (reachIssue)
@@ -910,7 +968,7 @@ public class PhoneCamGui : Form
         if (running) Log("stopped");
         timer.Stop();
         reconnecting = false;
-        srtMode = false;
+        srtMode = false; webrtcMode = false;
         embedded = IntPtr.Zero;
         micLevel = 0f;
         if (micMeter != null) { micMeter.Visible = false; micLabel.Visible = false; }
@@ -1024,7 +1082,8 @@ public class PhoneCamGui : Form
                     case "mic": cbMic.Checked = kv[1] == "1"; break;
                     case "flipH": cbFlipH.Checked = kv[1] == "1"; break;
                     case "flipV": cbFlipV.Checked = kv[1] == "1"; break;
-                    case "encrypt": cbEncrypt.Checked = kv[1] == "1"; break;
+                    case "encrypt": if (kv[1] == "1" && cbTransport.SelectedIndex == 0) cbTransport.SelectedIndex = 1; break;   // migrate old bool
+                    case "transport": { int ti; if (int.TryParse(kv[1], out ti) && ti >= 0 && ti < cbTransport.Items.Count) cbTransport.SelectedIndex = ti; } break;
                     case "srtpass": srtStablePass = kv[1]; break;
                     case "autolisten": autoListen = kv[1] == "1"; break;
                     case "boost": { int bi; if (int.TryParse(kv[1], out bi) && bi >= 0 && bi < BoostDb.Length) cbBoost.SelectedIndex = bi; } break;
@@ -1053,7 +1112,7 @@ public class PhoneCamGui : Form
                 "mic=" + (cbMic.Checked ? "1" : "0"),
                 "flipH=" + (cbFlipH.Checked ? "1" : "0"),
                 "flipV=" + (cbFlipV.Checked ? "1" : "0"),
-                "encrypt=" + (cbEncrypt.Checked ? "1" : "0"),
+                "transport=" + cbTransport.SelectedIndex,
                 "srtpass=" + srtStablePass,
                 "boost=" + cbBoost.SelectedIndex,
                 "eqcustom=" + customEq,
