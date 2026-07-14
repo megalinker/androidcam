@@ -88,7 +88,7 @@ gathering). Then DTLS‑SRTP media over UDP.
 | 1b | ✅ DONE. `PCAM3` TCP SDP offer/answer exchange, `pairSecret`‑gated (`webrtc_signaling.exe`): full handshake + WebRTC media over a real socket (40/50 RTP). | Me |
 | 2a | ✅ DONE. Codec bridge (`webrtc_audio.exe`): libopus‑encoded tone → RTP → FFmpeg Opus decode, decoded PCM RMS=0.21 matches the tone. RTP header parse handles CSRC+extensions. | Me |
 | 2b | ✅ DONE. `receiver.exe --webrtc` (webrtc_receiver.cpp): PCAM3 signaling server + offerer + RTP→Opus decode → audio thread → `WasapiSink`. Verified with `webrtc_testsender.exe` (phone stand-in, real Opus): recorded CABLE Output shows a steady −18 dB tone for the full 6 s, no dropouts. | Me |
-| 3 | Phone sender: WebRTC Android peer captures mic → Opus → audio track; connects via the signaling channel. | Tester device |
+| 3 | ✅ CODE DONE (awaiting tester runtime check). Phone `WebRtcSender.kt` (org.webrtc): PCAM3 client, answers the PC's recvonly offer with a sendonly mic Opus track. GUI: "Wi-Fi transport" dropdown (Standard/Encrypted/Low-latency⚡) launches `receiver.exe --webrtc` + PCAM3 QR. Both sides compile; CI APK green (0.5.0-webrtc.1). First real phone→PC WebRTC audio needs the tester's device. | Tester device |
 | 4 | Mic‑only end‑to‑end + measure latency & battery on the tester's phone vs SRT. Go/no‑go on the numbers. | Tester device |
 | 5 | Add **H.264 video** track both ends → full webcam. | Tester device |
 | 6 | Make WebRTC the default, keep RTSP as the compatibility fallback, retire SRT. | Tester device |
