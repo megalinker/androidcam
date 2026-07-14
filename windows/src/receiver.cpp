@@ -31,6 +31,9 @@ extern "C" {
 
 #include "wasapi_sink.h"
 #include "preview_window.h"
+#ifdef HAVE_WEBRTC
+#include "webrtc_receiver.h"   // --webrtc: PCAM3 signaling + DTLS-SRTP Opus -> WASAPI
+#endif
 
 #ifdef HAVE_SOFTCAM
 // tshino/softcam exposes the plain-C sc* API only from its DLL; the static softcamcore.lib
@@ -223,6 +226,9 @@ struct Options {
     std::string eqPreset;     // voice EQ: preset name or a "type:freq:q:gain;..." band list
     std::string rtspUser;     // RTSP Basic-auth credentials (kept out of the logged URL)
     std::string rtspPass;
+    bool        webrtc = false;   // --webrtc: run the WebRTC receive path instead of RTSP/SRT
+    int         sigPort = 0;      // --sig-port: PCAM3 TCP signaling port
+    std::string sigSecret;        // --sig-secret: pairSecret gate
 };
 
 // URL safe to print: drop the query string (SRT carries ?passphrase=… there) so no secret is logged.
@@ -259,6 +265,9 @@ static Options parse_args(int argc, char** argv) {
         else if (a == "--eq" && i + 1 < argc) o.eqPreset = argv[++i];
         else if (a == "--rtsp-user" && i + 1 < argc) o.rtspUser = argv[++i];
         else if (a == "--rtsp-pass" && i + 1 < argc) o.rtspPass = argv[++i];
+        else if (a == "--webrtc") o.webrtc = true;
+        else if (a == "--sig-port" && i + 1 < argc) o.sigPort = atoi(argv[++i]);
+        else if (a == "--sig-secret" && i + 1 < argc) o.sigSecret = argv[++i];
         else if (a.rfind("--", 0) == 0) fprintf(stderr, "ignoring unknown option: %s\n", a.c_str());
         else o.url = argv[i];
     }
@@ -371,6 +380,27 @@ static int run_session(const Options& opt, PreviewWindow* preview) {
 
 int main(int argc, char** argv) {
     Options opt = parse_args(argc, argv);
+
+#ifdef HAVE_WEBRTC
+    if (opt.webrtc) {
+        if (opt.sigPort <= 0 || opt.sigSecret.empty()) {
+            fprintf(stderr, "usage: %s --webrtc --sig-port <port> --sig-secret <secret> "
+                            "[--audio-device <name-substr>] [--mic-gain <db>] [--eq <preset>]\n", argv[0]);
+            return 1;
+        }
+        signal(SIGINT, on_sigint);
+        fprintf(stderr, "[phonecam] transport=webrtc (DTLS-SRTP + Opus)  audio=%s\n",
+                opt.audioDevice.empty() ? "default-output" : opt.audioDevice.c_str());
+        WebrtcRecvConfig cfg;
+        cfg.sigPort     = opt.sigPort;
+        cfg.sigSecret   = opt.sigSecret;
+        cfg.audioDevice = opt.audioDevice;
+        cfg.micGainDb   = opt.micGainDb;
+        cfg.eqPreset    = opt.eqPreset;
+        return run_webrtc_session(cfg, &g_running);
+    }
+#endif
+
     if (!opt.url) {
         fprintf(stderr,
             "usage: %s rtsp://<phone-ip>:8554/ [--preview] [--no-audio] "

@@ -87,7 +87,7 @@ gathering). Then DTLS‑SRTP media over UDP.
 | 1a | ✅ DONE. DTLS‑SRTP media loopback (`webrtc_loopback.exe`): two peers, LAN host candidates, Opus RTP flows (45/50). Biggest transport de‑risk. | Me |
 | 1b | ✅ DONE. `PCAM3` TCP SDP offer/answer exchange, `pairSecret`‑gated (`webrtc_signaling.exe`): full handshake + WebRTC media over a real socket (40/50 RTP). | Me |
 | 2a | ✅ DONE. Codec bridge (`webrtc_audio.exe`): libopus‑encoded tone → RTP → FFmpeg Opus decode, decoded PCM RMS=0.21 matches the tone. RTP header parse handles CSRC+extensions. | Me |
-| 2b | PC receiver: wire the offerer + PCAM3 signaling + RTP→Opus decode into `receiver.exe` → feed `AVFrame`s to the existing `WasapiSink`/CABLE. Verify a tone comes out the virtual mic. | Me |
+| 2b | ✅ DONE. `receiver.exe --webrtc` (webrtc_receiver.cpp): PCAM3 signaling server + offerer + RTP→Opus decode → audio thread → `WasapiSink`. Verified with `webrtc_testsender.exe` (phone stand-in, real Opus): recorded CABLE Output shows a steady −18 dB tone for the full 6 s, no dropouts. | Me |
 | 3 | Phone sender: WebRTC Android peer captures mic → Opus → audio track; connects via the signaling channel. | Tester device |
 | 4 | Mic‑only end‑to‑end + measure latency & battery on the tester's phone vs SRT. Go/no‑go on the numbers. | Tester device |
 | 5 | Add **H.264 video** track both ends → full webcam. | Tester device |

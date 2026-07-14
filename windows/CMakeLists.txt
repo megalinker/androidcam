@@ -68,7 +68,8 @@ endif()
 option(WITH_WEBRTC "Build the WebRTC (libdatachannel) receiver path" OFF)
 if(WITH_WEBRTC)
     find_package(LibDataChannel CONFIG REQUIRED)
-    target_link_libraries(receiver PRIVATE LibDataChannel::LibDataChannel)
+    target_sources(receiver PRIVATE src/webrtc_receiver.cpp)   # --webrtc receive path
+    target_link_libraries(receiver PRIVATE LibDataChannel::LibDataChannel ws2_32)
     target_compile_definitions(receiver PRIVATE HAVE_WEBRTC)
     # Phase 1 de-risk: in-process DTLS-SRTP media loopback.
     add_executable(webrtc_loopback src/webrtc_loopback.cpp)
@@ -81,6 +82,11 @@ if(WITH_WEBRTC)
     target_include_directories(webrtc_audio PRIVATE "${FFMPEG_ROOT}/include")
     target_link_directories(webrtc_audio PRIVATE "${FFMPEG_ROOT}/lib")
     target_link_libraries(webrtc_audio PRIVATE LibDataChannel::LibDataChannel avcodec avutil)
+    # Phase 2b: phone stand-in — PCAM3 client that sends a real Opus tone (validates receiver.exe --webrtc).
+    add_executable(webrtc_testsender src/webrtc_testsender.cpp)
+    target_include_directories(webrtc_testsender PRIVATE "${FFMPEG_ROOT}/include")
+    target_link_directories(webrtc_testsender PRIVATE "${FFMPEG_ROOT}/lib")
+    target_link_libraries(webrtc_testsender PRIVATE LibDataChannel::LibDataChannel avcodec avutil ws2_32)
     message(STATUS "WebRTC path enabled (libdatachannel)")
 endif()
 
