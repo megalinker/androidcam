@@ -46,6 +46,7 @@ class MainActivity : AppCompatActivity() {
     // Wi-Fi pairing: the PC target from the last scanned QR, held across the permission prompt.
     private var pendingTarget: PcTarget? = null
     private var pendingSrt: SrtTarget? = null   // same, for an encrypted (SRT) code
+    private var pendingWebrtc: WebrtcTarget? = null   // same, for a WebRTC (PCAM3) code
     // A note shown in the status card while streaming but not yet connected (e.g. announce failed).
     private var pairingNote: String? = null
     private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
@@ -99,6 +100,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onScanned(payload: String) {
+        if (payload.trim().startsWith("PCAM3:")) {                 // WebRTC (low-latency, encrypted) code
+            val wr = WebrtcTarget.parse(payload)
+            if (wr == null) {
+                Toast.makeText(this, "That isn't a valid PhoneCam code.", Toast.LENGTH_SHORT).show()
+                return
+            }
+            pendingWebrtc = wr
+            if (ensurePermissions()) beginWebrtc()
+            return
+        }
         if (payload.trim().startsWith("PCAM2:")) {                 // encrypted (SRT) code
             val srt = SrtTarget.parse(payload)
             if (srt == null) {
@@ -128,16 +139,58 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(this, "Connecting (encrypted) to ${srt.host}…", Toast.LENGTH_SHORT).show()
     }
 
-    /** One-tap reconnect to the last encrypted PC — no QR. The PC just needs to be listening (Start). */
+    /** WebRTC mode (mic-only): answer the scanned PC's PCAM3 offer. Phone connects out; no announce-back. */
+    private fun beginWebrtc() {
+        val wr = pendingWebrtc ?: return
+        pendingWebrtc = null
+        pairingNote = null
+        saveWebrtcTarget(wr)   // remember for one-tap reconnect
+        if (!StreamService.isRunning) startWebrtcStreaming(wr)
+        Toast.makeText(this, "Connecting (WebRTC) to ${wr.host}…", Toast.LENGTH_SHORT).show()
+    }
+
+    /** One-tap reconnect to the last encrypted PC — no QR. Uses whichever transport was last paired. */
     private fun reconnectSrt() {
-        val srt = savedSrtTarget() ?: return
-        pendingSrt = srt
-        if (ensurePermissions()) beginSrt()   // else resumed from onRequestPermissionsResult
+        when (prefs.getString(KEY_LAST_TRANSPORT, null)) {
+            "webrtc" -> savedWebrtcTarget()?.let { pendingWebrtc = it; if (ensurePermissions()) beginWebrtc() }
+            else -> savedSrtTarget()?.let { pendingSrt = it; if (ensurePermissions()) beginSrt() }
+        }
+    }
+
+    private fun saveWebrtcTarget(wr: WebrtcTarget) {
+        prefs.edit()
+            .putString(KEY_SIG_HOST, wr.host).putInt(KEY_SIG_PORT, wr.port).putString(KEY_SIG_SECRET, wr.secret)
+            .putString(KEY_LAST_TRANSPORT, "webrtc")
+            .apply()
+    }
+
+    private fun savedWebrtcTarget(): WebrtcTarget? {
+        val host = prefs.getString(KEY_SIG_HOST, null) ?: return null
+        val secret = prefs.getString(KEY_SIG_SECRET, null) ?: return null
+        val port = prefs.getInt(KEY_SIG_PORT, 0)
+        if (host.isEmpty() || secret.isEmpty() || port !in 1..65535) return null
+        return WebrtcTarget(host, port, secret)
+    }
+
+    private fun startWebrtcStreaming(wr: WebrtcTarget) {
+        // WebRTC is mic-only for now; persist the mode choice but the service forces mic.
+        prefs.edit().putString(KEY_QUALITY, selectedQuality().name).apply()
+        val intent = Intent(this, StreamService::class.java).apply {
+            action = StreamService.ACTION_START
+            putExtra(StreamService.EXTRA_MODE, StreamService.Mode.MIC_ONLY.name)
+            putExtra(StreamService.EXTRA_QUALITY, selectedQuality().name)
+            putExtra(StreamService.EXTRA_TRANSPORT, "webrtc")
+            putExtra(StreamService.EXTRA_SIG_HOST, wr.host)
+            putExtra(StreamService.EXTRA_SIG_PORT, wr.port)
+            putExtra(StreamService.EXTRA_SIG_SECRET, wr.secret)
+        }
+        ContextCompat.startForegroundService(this, intent)
     }
 
     private fun saveSrtTarget(srt: SrtTarget) {
         prefs.edit()
             .putString(KEY_SRT_HOST, srt.host).putInt(KEY_SRT_PORT, srt.port).putString(KEY_SRT_PASS, srt.passphrase)
+            .putString(KEY_LAST_TRANSPORT, "srt")
             .apply()
     }
 
@@ -273,9 +326,9 @@ class MainActivity : AppCompatActivity() {
         val running = StreamService.isRunning
         startBtn.text = if (running) "Stop streaming" else "Start streaming"
         findViewById<View>(R.id.scanBtn).visibility = if (running) View.GONE else View.VISIBLE
-        // One-tap reconnect: only useful when idle and we've paired with an encrypted PC before.
+        // One-tap reconnect: only useful when idle and we've paired with an encrypted PC before (SRT or WebRTC).
         findViewById<View>(R.id.reconnectBtn).visibility =
-            if (!running && savedSrtTarget() != null) View.VISIBLE else View.GONE
+            if (!running && (savedSrtTarget() != null || savedWebrtcTarget() != null)) View.VISIBLE else View.GONE
         statusCard.visibility = if (running) View.VISIBLE else View.GONE
         idleHint.visibility = if (running) View.GONE else View.VISIBLE
 
@@ -342,12 +395,13 @@ class MainActivity : AppCompatActivity() {
         val micOk = isGranted(permissions, grantResults, Manifest.permission.RECORD_AUDIO)
         if (camOk && micOk) {
             when {
+                pendingWebrtc != null -> beginWebrtc()
                 pendingSrt != null -> beginSrt()
                 pendingTarget != null -> beginPairing()
                 else -> startStreaming()
             }
         } else {
-            pendingTarget = null; pendingSrt = null
+            pendingTarget = null; pendingSrt = null; pendingWebrtc = null
             pcStatus.text = "Camera and microphone permissions are required."
         }
     }
@@ -364,5 +418,9 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_SRT_HOST = "srtHost"
         private const val KEY_SRT_PORT = "srtPort"
         private const val KEY_SRT_PASS = "srtPass"
+        private const val KEY_SIG_HOST = "sigHost"
+        private const val KEY_SIG_PORT = "sigPort"
+        private const val KEY_SIG_SECRET = "sigSecret"
+        private const val KEY_LAST_TRANSPORT = "lastTransport"
     }
 }

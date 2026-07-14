@@ -57,11 +57,17 @@ class StreamService : Service(), ConnectChecker {
         const val ACTION_SWITCH_CAMERA = "com.phonecam.action.SWITCH_CAMERA"
         const val EXTRA_MODE = "mode"
         const val EXTRA_QUALITY = "quality"
-        // Encrypted transport: "rtsp" (default, phone = server) or "srt" (phone pushes AES-encrypted to the PC).
+        // Transport: "rtsp" (default, phone = server), "srt" (phone pushes AES-encrypted to the PC),
+        // or "webrtc" (phone answers the PC's PCAM3 offer with a sendonly Opus mic track — mic-only,
+        // Phase 3 of docs/webrtc-migration.md).
         const val EXTRA_TRANSPORT = "transport"
         const val EXTRA_SRT_HOST = "srtHost"
         const val EXTRA_SRT_PORT = "srtPort"
         const val EXTRA_SRT_PASS = "srtPass"
+        // WebRTC signaling target (PCAM3 QR).
+        const val EXTRA_SIG_HOST = "sigHost"
+        const val EXTRA_SIG_PORT = "sigPort"
+        const val EXTRA_SIG_SECRET = "sigSecret"
         const val SRT_LATENCY_MS = 120   // SRT receive buffer; recovers loss, keeps latency low on a LAN
 
         const val PORT = 8554
@@ -135,6 +141,7 @@ class StreamService : Service(), ConnectChecker {
 
     private var stream: RtspServerStream? = null
     private var srtStream: SrtStream? = null
+    private var webrtcSender: WebRtcSender? = null
     @Volatile private var isSrt = false   // current transport, so the ConnectChecker callbacks know what they mean
     private var wakeLock: PowerManager.WakeLock? = null
     private var controlServer: java.net.ServerSocket? = null
@@ -176,17 +183,25 @@ class StreamService : Service(), ConnectChecker {
         val srtHost = intent?.getStringExtra(EXTRA_SRT_HOST)
         val srtPort = intent?.getIntExtra(EXTRA_SRT_PORT, 0) ?: 0
         val srtPass = intent?.getStringExtra(EXTRA_SRT_PASS)
+        val sigHost = intent?.getStringExtra(EXTRA_SIG_HOST)
+        val sigPort = intent?.getIntExtra(EXTRA_SIG_PORT, 0) ?: 0
+        val sigSecret = intent?.getStringExtra(EXTRA_SIG_SECRET)
 
-        startForegroundForMode(mode)
-        startStreaming(mode, quality, transport, srtHost, srtPort, srtPass)
+        // WebRTC is mic-only for now (Phase 3); force the mic foreground type regardless of the toggle.
+        startForegroundForMode(if (transport == "webrtc") Mode.MIC_ONLY else mode)
+        startStreaming(mode, quality, transport, srtHost, srtPort, srtPass, sigHost, sigPort, sigSecret)
         return START_STICKY
     }
 
     private fun startStreaming(mode: Mode, quality: Quality, transport: String,
-                               srtHost: String?, srtPort: Int, srtPass: String?) {
+                               srtHost: String?, srtPort: Int, srtPass: String?,
+                               sigHost: String?, sigPort: Int, sigSecret: String?) {
         if (isRunning) return
         clientConnected = false; everConnected = false
         isSrt = transport == "srt"
+
+        // WebRTC (mic-only) takes a wholly separate path — org.webrtc, not RootEncoder.
+        if (transport == "webrtc") { startWebrtcStreaming(sigHost, sigPort, sigSecret); return }
 
         // The RTSP server won't answer a client until the video encoder emits its first keyframe
         // (SPS/PPS via onVideoInfo), and a NoVideoSource never produces one. Camera modes use the real
@@ -322,6 +337,51 @@ class StreamService : Service(), ConnectChecker {
         }
     }
 
+    /**
+     * WebRTC mic-only: answer the PC's PCAM3 offer with a sendonly Opus track over DTLS-SRTP.
+     * No RootEncoder, no camera, no dummy-video hack — org.webrtc captures the mic directly.
+     * The PC is the offerer/listener, so "connected" comes from the WebRTC state callback.
+     */
+    private fun startWebrtcStreaming(sigHost: String?, sigPort: Int, sigSecret: String?) {
+        if (sigHost.isNullOrEmpty() || sigPort !in 1..65535 || sigSecret.isNullOrEmpty()) {
+            Log.e(TAG, "webrtc: missing signaling target (host=$sigHost port=$sigPort)")
+            stopSelf(); return
+        }
+        try {
+            val sender = WebRtcSender(applicationContext, sigHost, sigPort, sigSecret) { state ->
+                when (state) {
+                    WebRtcSender.State.CONNECTED -> {
+                        clientConnected = true; everConnected = true
+                        lastClientMs = SystemClock.elapsedRealtime()
+                        Log.i(TAG, "webrtc: connected to PC")
+                    }
+                    WebRtcSender.State.CONNECTING -> Log.i(TAG, "webrtc: connecting…")
+                    WebRtcSender.State.DISCONNECTED, WebRtcSender.State.FAILED -> {
+                        clientConnected = false
+                        Log.i(TAG, "webrtc: $state — stopping")
+                        idleHandler.post { stopStreaming() }   // PC gone → stop, mirroring SRT
+                    }
+                }
+            }
+            webrtcSender = sender
+            sender.start()
+            streamUrl = "WebRTC → $sigHost"
+            isRunning = true
+            acquireWakeLock()
+            lastClientMs = SystemClock.elapsedRealtime()
+            idleHandler.postDelayed(idleCheck, IDLE_CHECK_MS)
+            Log.i(TAG, "webrtc mic push up to $sigHost:$sigPort")
+            updateNotification()
+        } catch (e: Exception) {
+            Log.e(TAG, "startWebrtcStreaming failed", e)
+            releaseWakeLock()
+            runCatching { webrtcSender?.stop() }
+            webrtcSender = null
+            isRunning = false
+            stopSelf()
+        }
+    }
+
     /** Pull URL from the phone's Wi-Fi (wlan) IPv4, skipping VPN/cellular interfaces. Null if none. */
     private fun wifiRtspUrl(): String? = try {
         java.net.NetworkInterface.getNetworkInterfaces().toList()
@@ -413,7 +473,8 @@ class StreamService : Service(), ConnectChecker {
         releaseWakeLock()
         stream?.let { if (it.isStreaming) it.stopStream() }
         runCatching { srtStream?.let { if (it.isStreaming) it.stopStream() } }
-        stream = null; srtStream = null; isSrt = false
+        runCatching { webrtcSender?.stop() }
+        stream = null; srtStream = null; webrtcSender = null; isSrt = false
         isRunning = false
         streamUrl = null
         clientConnected = false; everConnected = false
