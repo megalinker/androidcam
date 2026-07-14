@@ -91,13 +91,14 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.4.24";
+    const string Version = "0.4.25";
     const string RtspUser = "phonecam";   // Basic-auth username the phone expects
     const int LocalPort = 18554, PhonePort = 8554;
     const int PhoneControlPort = 8555, LocalControlPort = 18555;   // "stop the phone now" channel (USB uses the forward)
     const int SrtPort = 8890;    // UDP port the PC's SRT listener binds in encrypted mode
     bool srtMode = false;        // this session is an encrypted SRT listen (phone pushes to us)
     string srtPass = "";         // the SRT passphrase for this session (kept out of logs)
+    string srtStablePass = "";   // persisted passphrase, so a phone that saved us can reconnect later
     DateTime srtWaitSince = DateTime.MinValue;   // when the encrypted QR went up (to time the VPN hint)
     bool usbForwarded = false, running = false;
     volatile bool videoSeen = false, audioSeen = false, reachIssue = false;   // from receiver stderr, drive the status
@@ -588,7 +589,9 @@ public class PhoneCamGui : Form
         string ip = LocalIPv4();
         if (ip == null) { MessageBox.Show("Couldn't determine this PC's Wi-Fi address. Use USB, or turn off Encrypted.", "PhoneCam"); return; }
         srtMode = true;
-        srtPass = Guid.NewGuid().ToString("N").Substring(0, 24);   // 24-hex SRT passphrase (min 10, max 79)
+        // Stable passphrase (persisted): a phone that saved us can reconnect across sessions without re-scanning.
+        if (srtStablePass.Length < 10) { srtStablePass = Guid.NewGuid().ToString("N").Substring(0, 24); SaveSettings(); }
+        srtPass = srtStablePass;
         string listenUrl = "srt://0.0.0.0:" + SrtPort + "?mode=listener&passphrase=" + srtPass + "&pbkeylen=16&latency=120000";
         string payload = "PCAM2:" + ip + ":" + SrtPort + ":" + srtPass;
         Log("SRT: listening (encrypted) on udp/" + SrtPort + " — waiting for the phone to scan");
@@ -1006,6 +1009,7 @@ public class PhoneCamGui : Form
                     case "flipH": cbFlipH.Checked = kv[1] == "1"; break;
                     case "flipV": cbFlipV.Checked = kv[1] == "1"; break;
                     case "encrypt": cbEncrypt.Checked = kv[1] == "1"; break;
+                    case "srtpass": srtStablePass = kv[1]; break;
                     case "boost": { int bi; if (int.TryParse(kv[1], out bi) && bi >= 0 && bi < BoostDb.Length) cbBoost.SelectedIndex = bi; } break;
                     case "eqcustom": customEq = kv[1]; break;
                     case "eq": { int ei; if (int.TryParse(kv[1], out ei) && ei >= 0 && ei < cbEq.Items.Count) { suppressEqDialog = true; cbEq.SelectedIndex = ei; suppressEqDialog = false; prevEqIndex = ei; } } break;
@@ -1033,6 +1037,7 @@ public class PhoneCamGui : Form
                 "flipH=" + (cbFlipH.Checked ? "1" : "0"),
                 "flipV=" + (cbFlipV.Checked ? "1" : "0"),
                 "encrypt=" + (cbEncrypt.Checked ? "1" : "0"),
+                "srtpass=" + srtStablePass,
                 "boost=" + cbBoost.SelectedIndex,
                 "eqcustom=" + customEq,
                 "eq=" + cbEq.SelectedIndex,

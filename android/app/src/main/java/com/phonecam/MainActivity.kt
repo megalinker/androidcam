@@ -81,6 +81,7 @@ class MainActivity : AppCompatActivity() {
             else if (ensurePermissions()) startStreaming()
         }
         findViewById<MaterialButton>(R.id.scanBtn).setOnClickListener { launchScan() }
+        findViewById<MaterialButton>(R.id.reconnectBtn).setOnClickListener { reconnectSrt() }
         urlText.setOnClickListener { copyUrl() }
         findViewById<MaterialButton>(R.id.switchCamBtn).setOnClickListener { switchCamera() }
     }
@@ -122,8 +123,30 @@ class MainActivity : AppCompatActivity() {
         val srt = pendingSrt ?: return
         pendingSrt = null
         pairingNote = null
+        saveSrtTarget(srt)   // remember this PC so the "Reconnect" button can skip the QR next time
         if (!StreamService.isRunning) startSrtStreaming(srt)
         Toast.makeText(this, "Connecting (encrypted) to ${srt.host}…", Toast.LENGTH_SHORT).show()
+    }
+
+    /** One-tap reconnect to the last encrypted PC — no QR. The PC just needs to be listening (Start). */
+    private fun reconnectSrt() {
+        val srt = savedSrtTarget() ?: return
+        pendingSrt = srt
+        if (ensurePermissions()) beginSrt()   // else resumed from onRequestPermissionsResult
+    }
+
+    private fun saveSrtTarget(srt: SrtTarget) {
+        prefs.edit()
+            .putString(KEY_SRT_HOST, srt.host).putInt(KEY_SRT_PORT, srt.port).putString(KEY_SRT_PASS, srt.passphrase)
+            .apply()
+    }
+
+    private fun savedSrtTarget(): SrtTarget? {
+        val host = prefs.getString(KEY_SRT_HOST, null) ?: return null
+        val pass = prefs.getString(KEY_SRT_PASS, null) ?: return null
+        val port = prefs.getInt(KEY_SRT_PORT, 0)
+        if (host.isEmpty() || pass.isEmpty() || port !in 1..65535) return null
+        return SrtTarget(host, port, pass)
     }
 
     private fun startSrtStreaming(srt: SrtTarget) {
@@ -250,6 +273,9 @@ class MainActivity : AppCompatActivity() {
         val running = StreamService.isRunning
         startBtn.text = if (running) "Stop streaming" else "Start streaming"
         findViewById<View>(R.id.scanBtn).visibility = if (running) View.GONE else View.VISIBLE
+        // One-tap reconnect: only useful when idle and we've paired with an encrypted PC before.
+        findViewById<View>(R.id.reconnectBtn).visibility =
+            if (!running && savedSrtTarget() != null) View.VISIBLE else View.GONE
         statusCard.visibility = if (running) View.VISIBLE else View.GONE
         idleHint.visibility = if (running) View.GONE else View.VISIBLE
 
@@ -335,5 +361,8 @@ class MainActivity : AppCompatActivity() {
         private const val REQ_PERMS = 1
         private const val KEY_MODE = "mode"
         private const val KEY_QUALITY = "quality"
+        private const val KEY_SRT_HOST = "srtHost"
+        private const val KEY_SRT_PORT = "srtPort"
+        private const val KEY_SRT_PASS = "srtPass"
     }
 }
