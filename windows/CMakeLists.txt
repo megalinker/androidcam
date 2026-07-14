@@ -57,6 +57,22 @@ if(WITH_SOFTCAM)
     target_link_libraries(receiver PRIVATE "${SOFTCAM_LIB}" winmm)
 endif()
 
+# ---------------------------------------------------------------------------
+# WebRTC media path (libdatachannel) — Phase 0 of docs/webrtc-migration.md.
+# OFF by default so the RTSP/SRT receiver keeps building unchanged. Enable with:
+#   vcpkg install libdatachannel:x64-windows
+#   cmake -B build-webrtc -A x64 -DWITH_WEBRTC=ON \
+#         -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
+# libdatachannel gives us DTLS-SRTP + RTP; codecs stay on FFmpeg, sinks stay as-is.
+# ---------------------------------------------------------------------------
+option(WITH_WEBRTC "Build the WebRTC (libdatachannel) receiver path" OFF)
+if(WITH_WEBRTC)
+    find_package(LibDataChannel CONFIG REQUIRED)
+    target_link_libraries(receiver PRIVATE LibDataChannel::LibDataChannel)
+    target_compile_definitions(receiver PRIVATE HAVE_WEBRTC)
+    message(STATUS "WebRTC path enabled (libdatachannel)")
+endif()
+
 # Copy the FFmpeg runtime DLLs next to receiver.exe after each build.
 file(GLOB FFMPEG_DLLS "${FFMPEG_ROOT}/bin/*.dll")
 if(FFMPEG_DLLS)
