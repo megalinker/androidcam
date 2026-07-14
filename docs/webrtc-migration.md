@@ -1,0 +1,95 @@
+# PhoneCam → WebRTC media migration (design + plan)
+
+## Goal
+
+Replace the current media transports (RTSP/AAC and SRT/AAC) with a **WebRTC media
+stack** — DTLS‑SRTP over RTP/UDP, Opus audio, hardware‑H.264 video, adaptive
+jitter buffers — paired over the LAN with **QR‑pinned identities** (no signaling
+server, no STUN/TURN). This is the standardized, battle‑tested version of the
+"Oboe → short‑frame codec → RTP/SRTP → tiny buffer" design.
+
+### Why (what it improves, honestly)
+
+| Front | Today (AAC/SRT) | After (WebRTC) | Extent |
+|---|---|---|---|
+| Latency | ~150–250 ms added (AAC 21 ms framing + 120 ms SRT buffer + fat WASAPI buffer) | ~30–60 ms | **Big** |
+| Security | SRT‑AES: encrypts, but not certificate‑authenticated | DTLS‑SRTP: authenticated encryption + QR‑pinned identity + ephemeral keys + replay protection | **Big** |
+| Battery (mic‑only) | Runs a *dummy 16×16 video encoder* just to satisfy RootEncoder's server | Pure audio track, no video encoder; Opus ≪ AAC/PCM data | **Better** |
+| Battery (video) | H.264 + AAC + SRT | H.264 + Opus + SRTP; sensor/encoder dominate either way; adaptive bitrate can help on bad Wi‑Fi | **~Neutral** |
+
+The only thing WebRTC can't beat: *absolute‑floor* latency AND lower battery at
+once (physics — tiny buffers ⇒ frequent wakeups). We are not chasing that floor;
+the balanced WebRTC profile (10 ms Opus, ~10–20 ms buffer, normal Wi‑Fi
+power‑save) is the target.
+
+## Architecture
+
+```
+Phone (WebRTC Android SDK, org.webrtc)                 PC (C++ + libdatachannel)
+  mic  → Opus  ─┐                                        ┌─ Opus → FFmpeg dec → WASAPI (CABLE)
+  cam  → H.264 ─┼─ RTP/SRTP (DTLS) over UDP, LAN direct ─┼─ H.264 → FFmpeg dec → softcam
+               ─┘                                        └─
+        SDP offer/answer + DTLS fingerprints over the QR‑bootstrapped TCP channel
+```
+
+### Library choices (deliberate, not shortcuts)
+
+- **Phone: WebRTC Android SDK** (`org.webrtc`, a maintained artifact such as
+  `io.github.webrtc-sdk:android` or `io.getstream:stream-webrtc-android`). The
+  standard way to do WebRTC on Android — Oboe/AAudio low‑latency capture, Opus,
+  H.264, DTLS‑SRTP, congestion control, all handled. We do **not** hand‑roll
+  libsrtp/BoringSSL/RTP — that's the exact "easy to get insecure" trap.
+- **PC: libdatachannel** (C++, MIT, standards‑compliant WebRTC: DTLS‑SRTP + RTP).
+  Chosen over Google's libwebrtc (brutal to build on Windows) and Pion/Go
+  (would force cgo bridges to our existing FFmpeg decode + softcam + WASAPI).
+  libdatachannel drops cleanly into the existing C++ receiver: it delivers
+  SRTP‑decrypted RTP; we depacketize → FFmpeg decode → the sinks we already have.
+
+### Signaling (QR‑bootstrapped, no server)
+
+The SDP is too big and dynamic for the QR alone, so the QR only **bootstraps**:
+
+1. PC generates its DTLS identity (cert + fingerprint), opens a TCP signaling
+   listener, and shows a QR: `PCAM3:<pcIP>:<sigPort>:<pairSecret>`.
+2. Phone scans, connects to the TCP listener, and the two exchange **SDP
+   offer/answer** (containing DTLS fingerprints and LAN host ICE candidates) over
+   that TCP channel, authenticated by `pairSecret`.
+3. WebRTC media (DTLS‑SRTP/UDP) establishes LAN‑direct. The exchanged DTLS
+   fingerprints ARE the pinned identity; `pairSecret` gates the exchange (MITM
+   resistance without a CA).
+
+This reuses the pairing pattern we already have (PCAM1/PCAM2), just carrying SDP.
+
+## Migration strategy (no bandaids, no breakage)
+
+- **Parallel, not rip‑and‑replace.** RTSP and SRT modes keep working through the
+  whole migration. WebRTC ships as a third mode, becomes default only once it's
+  proven on the tester's hardware, and the old paths are removed last.
+- **Mic‑only first.** It's the cleanest win (all three fronts improve, no video
+  complexity, and it deletes the dummy‑video‑encoder hack). Video track second.
+
+## Phases
+
+| # | Deliverable | Who can test |
+|---|---|---|
+| 0 | Deps + build: libdatachannel in the Windows CMake/CI build; WebRTC SDK gradle dep on Android. Both compile. | Me (PC build) / CI (APK) |
+| 1 | Signaling: `PCAM3` QR + TCP SDP offer/answer exchange, `pairSecret`‑gated, on both ends. | Me (loopback) |
+| 2 | PC receiver: libdatachannel peer accepts an **Opus audio** track → FFmpeg Opus decode → existing WASAPI/CABLE sink. Validate against a browser/Pion test sender. | **Me** (browser ↔ PC) |
+| 3 | Phone sender: WebRTC Android peer captures mic → Opus → audio track; connects via the signaling channel. | Tester device |
+| 4 | Mic‑only end‑to‑end + measure latency & battery on the tester's phone vs SRT. Go/no‑go on the numbers. | Tester device |
+| 5 | Add **H.264 video** track both ends → full webcam. | Tester device |
+| 6 | Make WebRTC the default, keep RTSP as the compatibility fallback, retire SRT. | Tester device |
+
+Gate: after Phase 4 we look at real numbers. If WebRTC doesn't beat SRT on the
+tester's hardware, we stop and keep SRT — the parallel strategy means that costs
+us nothing already shipped.
+
+## Risks
+
+- **Android is untestable by me** (CI builds only). Phases 3–5 need the tester's
+  device in the loop; expect device‑specific iteration.
+- **libdatachannel dependency chain on Windows** (OpenSSL, libsrtp, libjuice,
+  usrsctp) — Phase 0 sets this up via vcpkg/CMake in CI.
+- **A/V sync** once video is added (two tracks, one PeerConnection — WebRTC
+  handles RTCP sync, but the softcam/WASAPI feed timing needs care).
+- **QR size** — mitigated by exchanging SDP over TCP, not in the QR.
