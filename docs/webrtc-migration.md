@@ -102,7 +102,10 @@ us nothing already shipped.
 Both transports get measured under identical conditions (same phone, mode,
 quality, room, Wi‑Fi), SRT first (baseline), WebRTC after.
 
-- **Latency — `latbench.exe`** (PC tool, built on the existing WASAPI code):
+- **Latency — `latbench.exe`** ✅ BUILT (`windows/src/latbench.cpp`, WASAPI-only). Self-test
+  (`--selftest`, clicks → CABLE Input → CABLE Output, no phone) matched 10/10 at 27.7 ms mean /
+  0.3 ms stddev — that's the digital CABLE+WASAPI floor, common to both runs so it cancels in the
+  delta. Real run: just `latbench.exe` (clicks out the speakers, phone streaming into CABLE).
   opens a WASAPI **loopback** capture of the default speakers AND a capture of
   **CABLE Output**, plays a click train through the speakers (phone mic hears it
   → streams back → lands in CABLE), and cross‑correlates the two channels per

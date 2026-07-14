@@ -90,6 +90,19 @@ if(WITH_WEBRTC)
     message(STATUS "WebRTC path enabled (libdatachannel)")
 endif()
 
+# ---------------------------------------------------------------------------
+# latbench — end-to-end acoustic latency benchmark (WASAPI only, no webrtc dep).
+# Drives the Phase-4 go/no-go gate (SRT baseline vs WebRTC). Built with the webrtc
+# tools for convenience; enable standalone with -DWITH_LATBENCH=ON.
+# ---------------------------------------------------------------------------
+option(WITH_LATBENCH "Build the latbench latency benchmark tool" OFF)
+if(WITH_LATBENCH OR WITH_WEBRTC)
+    add_executable(latbench src/latbench.cpp)
+    if(WIN32)
+        target_link_libraries(latbench PRIVATE ole32)
+    endif()
+endif()
+
 # Copy the FFmpeg runtime DLLs next to receiver.exe after each build.
 file(GLOB FFMPEG_DLLS "${FFMPEG_ROOT}/bin/*.dll")
 if(FFMPEG_DLLS)
