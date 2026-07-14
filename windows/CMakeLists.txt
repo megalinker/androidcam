@@ -76,6 +76,11 @@ if(WITH_WEBRTC)
     # Phase 1b: PCAM3 TCP signaling (SDP offer/answer over the wire) + full WebRTC bring-up.
     add_executable(webrtc_signaling src/webrtc_signaling.cpp)
     target_link_libraries(webrtc_signaling PRIVATE LibDataChannel::LibDataChannel ws2_32)
+    # Phase 2 codec bridge: libdatachannel RTP <-> FFmpeg Opus (encode tone -> RTP -> decode -> verify).
+    add_executable(webrtc_audio src/webrtc_audio.cpp)
+    target_include_directories(webrtc_audio PRIVATE "${FFMPEG_ROOT}/include")
+    target_link_directories(webrtc_audio PRIVATE "${FFMPEG_ROOT}/lib")
+    target_link_libraries(webrtc_audio PRIVATE LibDataChannel::LibDataChannel avcodec avutil)
     message(STATUS "WebRTC path enabled (libdatachannel)")
 endif()
 
