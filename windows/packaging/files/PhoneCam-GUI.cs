@@ -67,7 +67,7 @@ public class PhoneCamGui : Form
     RadioButton rbUsb, rbWifi, rbQr;
     LinkLabel linkIp, linkDiag;
     TextBox tbIp;
-    CheckBox cbMic, cbFlipH, cbFlipV, cbUdp, cbEncrypt;
+    CheckBox cbMic, cbFlipH, cbFlipV, cbEncrypt;
     ComboBox cbBoost, cbEq;
     string customEq = "";        // user-defined band list ("type:f:q:db;...") from the EQ editor
     int prevEqIndex = 0;         // revert target if the custom editor is cancelled
@@ -91,7 +91,7 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.4.23";
+    const string Version = "0.4.24";
     const string RtspUser = "phonecam";   // Basic-auth username the phone expects
     const int LocalPort = 18554, PhonePort = 8554;
     const int PhoneControlPort = 8555, LocalControlPort = 18555;   // "stop the phone now" channel (USB uses the forward)
@@ -101,6 +101,7 @@ public class PhoneCamGui : Form
     DateTime srtWaitSince = DateTime.MinValue;   // when the encrypted QR went up (to time the VPN hint)
     bool usbForwarded = false, running = false;
     volatile bool videoSeen = false, audioSeen = false, reachIssue = false;   // from receiver stderr, drive the status
+    volatile bool streamDropped = false;   // the phone's stream ended mid-session (receiver is re-listening)
 
     // --- auto-reconnect: if receiver.exe dies unexpectedly, relaunch it against the same URL ---
     string lastUrl;              // the phone's rtsp URL we're (re)connecting to
@@ -163,7 +164,7 @@ public class PhoneCamGui : Form
         Text = "PhoneCam v" + Version;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(744, 570);
+        ClientSize = new Size(744, 560);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Bg; ForeColor = Fg;
         Font = new Font("Segoe UI", 9.5f);
@@ -198,35 +199,35 @@ public class PhoneCamGui : Form
         cbBoost.Enabled = cbMic.Checked; cbEq.Enabled = cbMic.Checked;
         cbFlipH = Check("Flip left / right", 22, 278);
         cbFlipV = Check("Flip up / down", 22, 304);
-        cbUdp = Check("Lower latency (Wi-Fi) — may glitch", 22, 330);
-        cbEncrypt = Check("Encrypted (🔒 Wi-Fi QR only)", 22, 354);
-        cbEncrypt.CheckedChanged += (s, e) => { if (cbEncrypt.Checked) cbUdp.Checked = false; };
-        Controls.Add(cbMic); Controls.Add(cbBoost); Controls.Add(cbEq); Controls.Add(cbFlipH); Controls.Add(cbFlipV); Controls.Add(cbUdp); Controls.Add(cbEncrypt);
+        // Encrypted = SRT (UDP, AES, low-latency). It fully supersedes the old "lower latency" RTSP-UDP
+        // toggle, so that one's gone; unchecked = plain RTSP over TCP (the reliable, VPN-friendly default).
+        cbEncrypt = Check("Encrypted (🔒 Wi-Fi QR only)", 22, 330);
+        Controls.Add(cbMic); Controls.Add(cbBoost); Controls.Add(cbEq); Controls.Add(cbFlipH); Controls.Add(cbFlipV); Controls.Add(cbEncrypt);
 
-        btnStart = new Button { Text = "Start", Location = new Point(22, 386), Size = new Size(224, 40), FlatStyle = FlatStyle.Flat, BackColor = Accent, ForeColor = Color.White, Font = new Font("Segoe UI Semibold", 11f) };
+        btnStart = new Button { Text = "Start", Location = new Point(22, 362), Size = new Size(224, 40), FlatStyle = FlatStyle.Flat, BackColor = Accent, ForeColor = Color.White, Font = new Font("Segoe UI Semibold", 11f) };
         btnStart.FlatAppearance.BorderSize = 0;
         btnStart.Click += OnStartStop;
         Controls.Add(btnStart);
 
-        lblDot = new Label { Text = "●", ForeColor = Sub, Location = new Point(24, 440), AutoSize = true, Font = new Font("Segoe UI", 11f) };
-        lblStatus = new Label { Text = "Idle", ForeColor = Sub, Location = new Point(44, 442), AutoSize = true, MaximumSize = new Size(220, 0) };
+        lblDot = new Label { Text = "●", ForeColor = Sub, Location = new Point(24, 416), AutoSize = true, Font = new Font("Segoe UI", 11f) };
+        lblStatus = new Label { Text = "Idle", ForeColor = Sub, Location = new Point(44, 418), AutoSize = true, MaximumSize = new Size(210, 0) };
         Controls.Add(lblDot); Controls.Add(lblStatus);
 
         // Live mic level meter (visible only while the mic is streaming).
-        micLabel = new Label { Text = "Mic", ForeColor = Sub, Location = new Point(24, 468), AutoSize = true, Font = new Font("Segoe UI", 8.25f), Visible = false };
-        micMeter = new Panel { Location = new Point(56, 469), Size = new Size(180, 12), BackColor = Color.FromArgb(20, 22, 25), Visible = false };
+        micLabel = new Label { Text = "Mic", ForeColor = Sub, Location = new Point(24, 446), AutoSize = true, Font = new Font("Segoe UI", 8.25f), Visible = false };
+        micMeter = new Panel { Location = new Point(56, 446), Size = new Size(184, 14), BackColor = Color.FromArgb(20, 22, 25), Visible = false };
         micMeter.Paint += PaintMeter;
         Controls.Add(micLabel); Controls.Add(micMeter);
 
-        tip = new Label { Text = TipText(false), ForeColor = Sub, Location = new Point(22, 492), AutoSize = true };
+        tip = new Label { Text = TipText(false), ForeColor = Sub, Location = new Point(22, 474), AutoSize = true, MaximumSize = new Size(236, 0) };
         Controls.Add(tip);
 
-        linkDiag = new LinkLabel { Text = "Copy diagnostics", Location = new Point(22, 540), AutoSize = true, LinkColor = Accent, ActiveLinkColor = Accent, LinkBehavior = LinkBehavior.AlwaysUnderline, Font = new Font("Segoe UI", 9f) };
+        linkDiag = new LinkLabel { Text = "Copy diagnostics", Location = new Point(22, 522), AutoSize = true, LinkColor = Accent, ActiveLinkColor = Accent, LinkBehavior = LinkBehavior.AlwaysUnderline, Font = new Font("Segoe UI", 9f) };
         linkDiag.LinkClicked += (s, e) => CopyDiagnostics();
         Controls.Add(linkDiag);
 
         // Right: embedded live preview (also hosts the pairing QR before a phone connects)
-        preview = new Panel { Location = new Point(260, 84), Size = new Size(468, 462), BackColor = Color.FromArgb(12, 13, 15), BorderStyle = BorderStyle.None };
+        preview = new Panel { Location = new Point(260, 84), Size = new Size(468, 446), BackColor = Color.FromArgb(12, 13, 15), BorderStyle = BorderStyle.None };
         preview.Paint += (s, e) => { using (var pen = new Pen(Line)) e.Graphics.DrawRectangle(pen, 0, 0, preview.Width - 1, preview.Height - 1); };
         previewHint = new Label { Text = "Live preview appears here once you press Start.", ForeColor = Sub, BackColor = Color.FromArgb(12, 13, 15), AutoSize = true, Location = new Point(16, 16) };
         // Centered as one vertical group inside the 468×392 preview panel: the QR block itself
@@ -264,10 +265,12 @@ public class PhoneCamGui : Form
         var g = e.Graphics;
         int w = micMeter.ClientSize.Width, h = micMeter.ClientSize.Height;
         float lvl = micLevel; if (lvl < 0f) lvl = 0f; if (lvl > 1f) lvl = 1f;
+        int iw = w - 2, ih = h - 2;   // 1px inset so the fill sits inside the border
         Color c = lvl < 0.7f ? Green : (lvl < 0.9f ? Amber : Color.FromArgb(226, 96, 96));
-        using (var b = new SolidBrush(c)) g.FillRectangle(b, 0, 0, (int)(w * lvl), h);
+        using (var b = new SolidBrush(c)) g.FillRectangle(b, 1, 1, (int)(iw * lvl), ih);
         using (var pen = new Pen(Color.FromArgb(60, 64, 72)))
-        { g.DrawLine(pen, (int)(w * 0.7f), 0, (int)(w * 0.7f), h); g.DrawLine(pen, (int)(w * 0.9f), 0, (int)(w * 0.9f), h); }
+        { g.DrawLine(pen, 1 + (int)(iw * 0.7f), 1, 1 + (int)(iw * 0.7f), 1 + ih); g.DrawLine(pen, 1 + (int)(iw * 0.9f), 1, 1 + (int)(iw * 0.9f), 1 + ih); }
+        using (var bp = new Pen(Line)) g.DrawRectangle(bp, 0, 0, w - 1, h - 1);
     }
 
     // --- system tray + start-with-Windows ---
@@ -331,8 +334,8 @@ public class PhoneCamGui : Form
     static string TipText(bool mic)
     {
         return mic
-            ? "In your call app pick “PhoneCam Camera” as the\ncamera and “CABLE Output” as the microphone."
-            : "Then pick “PhoneCam Camera” as the\nwebcam in Zoom / Teams / OBS.";
+            ? "In your call app: “PhoneCam Camera” (camera) + “CABLE Output” (mic)."
+            : "Pick “PhoneCam Camera” as the webcam in Zoom / Teams / OBS.";
     }
 
     // Connect + Options only take effect at Start, so lock them while streaming — otherwise ticking
@@ -341,7 +344,7 @@ public class PhoneCamGui : Form
     {
         rbUsb.Enabled = on; rbQr.Enabled = on; rbWifi.Enabled = on; linkIp.Enabled = on;
         tbIp.Enabled = on && rbWifi.Checked;
-        cbMic.Enabled = on; cbFlipH.Enabled = on; cbFlipV.Enabled = on; cbUdp.Enabled = on; cbEncrypt.Enabled = on;
+        cbMic.Enabled = on; cbFlipH.Enabled = on; cbFlipV.Enabled = on; cbEncrypt.Enabled = on;
         cbBoost.Enabled = on && cbMic.Checked;
         cbEq.Enabled = on && cbMic.Checked;
     }
@@ -523,9 +526,6 @@ public class PhoneCamGui : Form
         var a = new List<string> { url, "--preview" };   // --preview so we can embed the feed
         if (cbFlipH.Checked) a.Add("--flip-h");
         if (cbFlipV.Checked) a.Add("--flip-v");
-        // UDP avoids TCP's retransmit stalls (lower/steadier latency on busy Wi-Fi) but can't ride the
-        // USB adb tunnel, which is TCP-only — so only over Wi-Fi/QR.
-        if (cbUdp.Checked && !usbForwarded && !srtMode) a.Add("--udp");
         if (useMic)
         {
             a.Add("--audio-device"); a.Add("CABLE Input");
@@ -553,14 +553,16 @@ public class PhoneCamGui : Form
                 float lv; var parts = d.Split(' ');
                 if (parts.Length >= 2 && float.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out lv))
                 {
-                    micLevel = lv;
+                    micLevel = lv; streamDropped = false;   // audio flowing → the stream is live
                     try { if (micMeter.IsHandleCreated) micMeter.BeginInvoke((Action)(() => micMeter.Invalidate())); } catch { }
                 }
                 return;
             }
             Log("[recv] " + Redact(d));   // mask the password / passphrase if FFmpeg echoes the URL
-            if (d.IndexOf("[video]", StringComparison.OrdinalIgnoreCase) >= 0) videoSeen = true;
-            if (d.IndexOf("[audio] rendering", StringComparison.OrdinalIgnoreCase) >= 0) audioSeen = true;
+            if (d.IndexOf("[video]", StringComparison.OrdinalIgnoreCase) >= 0) { videoSeen = true; streamDropped = false; }
+            if (d.IndexOf("[audio] rendering", StringComparison.OrdinalIgnoreCase) >= 0) { audioSeen = true; streamDropped = false; }
+            // The receiver's reconnect loop prints "[net] stream ended/unreachable…" when the phone's feed drops.
+            if (d.IndexOf("[net]", StringComparison.OrdinalIgnoreCase) >= 0) streamDropped = true;
             if (d.IndexOf("401", StringComparison.Ordinal) >= 0 || d.IndexOf("Unauthorized", StringComparison.OrdinalIgnoreCase) >= 0)
             { authIssue = true; reachIssue = true; }
             if (d.IndexOf("reconnect", StringComparison.OrdinalIgnoreCase) >= 0 || d.IndexOf("unreachable", StringComparison.OrdinalIgnoreCase) >= 0
@@ -803,13 +805,18 @@ public class PhoneCamGui : Form
         // Encrypted connection stalling? Surface the VPN "allow LAN" hint (the usual culprit).
         bool srtStalled = srtMode && !hasVideo && !audioSeen && (DateTime.Now - srtWaitSince).TotalSeconds > 12;
         if (srtHint.Visible != srtStalled) srtHint.Visible = srtStalled;
-        bool micActive = running && audioSeen;
+        // Meter is hidden while dropped so a frozen last-value bar can't look "live". Empty it too.
+        bool micActive = running && audioSeen && !streamDropped;
         if (micMeter.Visible != micActive) { micMeter.Visible = micActive; micLabel.Visible = micActive; }
-        if (hasVideo) SetStatus(Green, "Live — select “PhoneCam Camera” in your app");
+        if (streamDropped && micLevel != 0f) { micLevel = 0f; }
+        // The phone stopping mid-session leaves a frozen preview, so this must win over the "Live" checks.
+        if (streamDropped)
+            SetStatus(Amber, "Phone stopped — press Stop, or restart it on the phone.");
+        else if (hasVideo) SetStatus(Green, "Live — camera ready ✓");   // detail (“pick PhoneCam Camera”) is in the tip below
         else if (audioSeen)
         {
             // Mic-only: there's no video window, so the video-based detection never fires. Audio is up.
-            SetStatus(Green, "Live (mic) — pick “CABLE Output” as your microphone");
+            SetStatus(Green, "Live — microphone ready ✓");
             if (embedded == IntPtr.Zero) { previewHint.Text = "Microphone only — no video."; previewHint.Visible = true; }
         }
         else if (srtMode)
@@ -954,11 +961,14 @@ public class PhoneCamGui : Form
         if (devices.Count == 0)
         {
             devicesPanel.Controls.Add(new Label {
-                Text = "Pair once with the QR and your phone is saved here,\nso next time you can reconnect with one click.",
+                Text = "Pair once with the QR and your phone is saved here.\nReconnect later without re-scanning (non-encrypted mode).",
                 ForeColor = Sub, Location = new Point(16, 42), AutoSize = true, BackColor = back });
             return;
         }
-        int y = 44, rowW = devicesPanel.ClientSize.Width - 24;
+        // Reconnecting to a saved phone dials into its RTSP server, so it must already be streaming.
+        devicesPanel.Controls.Add(new Label { Text = "Start streaming on the phone first, then Connect.",
+            ForeColor = Sub, Font = new Font("Segoe UI", 8f), Location = new Point(16, 35), AutoSize = true, BackColor = back });
+        int y = 58, rowW = devicesPanel.ClientSize.Width - 24;
         foreach (var d in devices)
         {
             string name = d[0], url = d[1], token = d.Length > 2 ? d[2] : "";
@@ -995,7 +1005,6 @@ public class PhoneCamGui : Form
                     case "mic": cbMic.Checked = kv[1] == "1"; break;
                     case "flipH": cbFlipH.Checked = kv[1] == "1"; break;
                     case "flipV": cbFlipV.Checked = kv[1] == "1"; break;
-                    case "udp": cbUdp.Checked = kv[1] == "1"; break;
                     case "encrypt": cbEncrypt.Checked = kv[1] == "1"; break;
                     case "boost": { int bi; if (int.TryParse(kv[1], out bi) && bi >= 0 && bi < BoostDb.Length) cbBoost.SelectedIndex = bi; } break;
                     case "eqcustom": customEq = kv[1]; break;
@@ -1023,7 +1032,6 @@ public class PhoneCamGui : Form
                 "mic=" + (cbMic.Checked ? "1" : "0"),
                 "flipH=" + (cbFlipH.Checked ? "1" : "0"),
                 "flipV=" + (cbFlipV.Checked ? "1" : "0"),
-                "udp=" + (cbUdp.Checked ? "1" : "0"),
                 "encrypt=" + (cbEncrypt.Checked ? "1" : "0"),
                 "boost=" + cbBoost.SelectedIndex,
                 "eqcustom=" + customEq,
