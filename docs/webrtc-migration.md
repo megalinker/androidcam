@@ -84,6 +84,27 @@ Gate: after Phase 4 we look at real numbers. If WebRTC doesn't beat SRT on the
 tester's hardware, we stop and keep SRT — the parallel strategy means that costs
 us nothing already shipped.
 
+## Benchmarking (before/after — drives the Phase‑4 gate)
+
+Both transports get measured under identical conditions (same phone, mode,
+quality, room, Wi‑Fi), SRT first (baseline), WebRTC after.
+
+- **Latency — `latbench.exe`** (PC tool, built on the existing WASAPI code):
+  opens a WASAPI **loopback** capture of the default speakers AND a capture of
+  **CABLE Output**, plays a click train through the speakers (phone mic hears it
+  → streams back → lands in CABLE), and cross‑correlates the two channels per
+  click. The gap = full mouth‑to‑virtual‑mic latency (capture + codec + transport
+  + jitter + render). Both channels share one capture clock, so no cross‑process
+  sync. A fixed speaker/acoustic offset is constant across runs, so the
+  before/after **delta is exact** even if the absolute carries that offset.
+  Report mean ± stddev over ~30 clicks.
+- **Battery**: phone streaming a fixed mode/quality/duration, screen off; sample
+  `adb shell cat /sys/class/power_supply/battery/current_now` (µA) at intervals
+  and/or `dumpsys batterystats` for the app UID → average mA. SRT vs WebRTC.
+
+Capture the **SRT baseline before touching the media path**, so "before" is
+locked in.
+
 ## Risks
 
 - **Android is untestable by me** (CI builds only). Phases 3–5 need the tester's

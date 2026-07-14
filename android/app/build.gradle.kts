@@ -72,4 +72,9 @@ dependencies {
     // RTSP-Server release notes for the core version it was tested against.
     implementation("com.github.pedroSG94:RTSP-Server:1.4.1")
     implementation("com.github.pedroSG94.RootEncoder:library:2.7.2")
+
+    // WebRTC media stack (org.webrtc.*) — Phase 0 of the WebRTC migration (docs/webrtc-migration.md).
+    // Pre-built, maintained; handles Oboe/AAudio capture, Opus/H264, DTLS-SRTP. Coexists with RootEncoder
+    // during the parallel migration.
+    implementation("io.getstream:stream-webrtc-android:1.3.10")
 }
