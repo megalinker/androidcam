@@ -85,13 +85,14 @@ public class PhoneCamGui : Form
     NotifyIcon tray;
     bool minimizeToTray = false;
     bool startMinimized = false;    // launched with -tray (autostart) → start hidden in the tray
+    bool autoListen = false;        // on launch, auto-start the encrypted SRT listener so the phone can one-tap reconnect
     System.Windows.Forms.Timer timer;
     Process recv;
     IntPtr embedded = IntPtr.Zero;
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.4.25";
+    const string Version = "0.4.26";
     const string RtspUser = "phonecam";   // Basic-auth username the phone expects
     const int LocalPort = 18554, PhonePort = 8554;
     const int PhoneControlPort = 8555, LocalControlPort = 18555;   // "stop the phone now" channel (USB uses the forward)
@@ -155,6 +156,8 @@ public class PhoneCamGui : Form
         // -tray (used by the start-with-Windows entry): come up hidden in the notification area.
         startMinimized = Array.IndexOf(Environment.GetCommandLineArgs(), "-tray") >= 0;
         if (startMinimized) Shown += (s, e) => { WindowState = FormWindowState.Minimized; Hide(); };
+        // Auto-listen: on every launch, start the encrypted listener so the phone can reconnect with one tap.
+        if (autoListen) Shown += (s, e) => { if (!running) StartAutoListen(); };
     }
 
     static string FindFirst(string[] paths)
@@ -286,17 +289,28 @@ public class PhoneCamGui : Form
         miAuto.Click += (s, e) => SetAutostart(miAuto.Checked);
         var miTray = new ToolStripMenuItem("Minimize to tray") { CheckOnClick = true, Checked = minimizeToTray };
         miTray.Click += (s, e) => { minimizeToTray = miTray.Checked; SaveSettings(); };
+        var miListen = new ToolStripMenuItem("Auto-listen for my phone (encrypted)") { CheckOnClick = true, Checked = autoListen };
+        miListen.Click += (s, e) => { autoListen = miListen.Checked; SaveSettings(); if (autoListen && !running && !reconnecting) StartAutoListen(); };
         var stop = new ToolStripMenuItem("Stop streaming");
         stop.Click += (s, e) => { if (running || reconnecting) { manualStop = true; SendPhoneStop(); StopReceiver(); } };
         var exit = new ToolStripMenuItem("Exit"); exit.Click += (s, e) => Close();
         menu.Items.Add(open); menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(miAuto); menu.Items.Add(miTray); menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(miAuto); menu.Items.Add(miTray); menu.Items.Add(miListen); menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(stop); menu.Items.Add(exit);
         tray = new NotifyIcon { Icon = SystemIcons.Application, Text = "PhoneCam", Visible = true, ContextMenuStrip = menu };
         tray.DoubleClick += (s, e) => ShowFromTray();
     }
 
     void ShowFromTray() { Show(); WindowState = FormWindowState.Normal; Activate(); }
+
+    /// <summary>Auto-listen: come up as the encrypted SRT listener so the phone can one-tap reconnect with
+    /// no PC interaction. The receiver keeps re-listening internally, so the PC stays ready between streams.</summary>
+    void StartAutoListen()
+    {
+        if (receiverExe == null || running || reconnecting) return;
+        rbQr.Checked = true; cbEncrypt.Checked = true;
+        StartReceiver();
+    }
 
     protected override void OnResize(EventArgs e)
     {
@@ -814,7 +828,9 @@ public class PhoneCamGui : Form
         if (streamDropped && micLevel != 0f) { micLevel = 0f; }
         // The phone stopping mid-session leaves a frozen preview, so this must win over the "Live" checks.
         if (streamDropped)
-            SetStatus(Amber, "Phone stopped — press Stop, or restart it on the phone.");
+            // In SRT mode the receiver keeps listening, so a drop just means "ready for the phone to reconnect".
+            SetStatus(Amber, srtMode ? "Phone disconnected — ready to reconnect (tap “Reconnect” on the phone)."
+                                     : "Phone stopped — press Stop, or restart it on the phone.");
         else if (hasVideo) SetStatus(Green, "Live — camera ready ✓");   // detail (“pick PhoneCam Camera”) is in the tip below
         else if (audioSeen)
         {
@@ -1010,6 +1026,7 @@ public class PhoneCamGui : Form
                     case "flipV": cbFlipV.Checked = kv[1] == "1"; break;
                     case "encrypt": cbEncrypt.Checked = kv[1] == "1"; break;
                     case "srtpass": srtStablePass = kv[1]; break;
+                    case "autolisten": autoListen = kv[1] == "1"; break;
                     case "boost": { int bi; if (int.TryParse(kv[1], out bi) && bi >= 0 && bi < BoostDb.Length) cbBoost.SelectedIndex = bi; } break;
                     case "eqcustom": customEq = kv[1]; break;
                     case "eq": { int ei; if (int.TryParse(kv[1], out ei) && ei >= 0 && ei < cbEq.Items.Count) { suppressEqDialog = true; cbEq.SelectedIndex = ei; suppressEqDialog = false; prevEqIndex = ei; } } break;
@@ -1042,6 +1059,7 @@ public class PhoneCamGui : Form
                 "eqcustom=" + customEq,
                 "eq=" + cbEq.SelectedIndex,
                 "tray=" + (minimizeToTray ? "1" : "0"),
+                "autolisten=" + (autoListen ? "1" : "0"),
             };
             var wl = (WindowState == FormWindowState.Normal ? Location : RestoreBounds.Location);
             lines.Add("winpos=" + wl.X + "," + wl.Y);
