@@ -64,6 +64,13 @@ The SDP is too big and dynamic for the QR alone, so the QR only **bootstraps**:
 
 This reuses the pairing pattern we already have (PCAM1/PCAM2), just carrying SDP.
 
+**Wire protocol** (proven in Phase 1b, `webrtc_signaling.cpp`; the phone mirrors it in
+Kotlin): length‑prefixed messages `[1 byte type][4‑byte big‑endian length][payload]`,
+types `S`=pairSecret, `O`=offer SDP, `A`=answer SDP. Sequence over the TCP channel:
+`phone→PC 'S'` (gated) → `PC→PC 'O'` offer (recvonly, sent after ICE gathering complete
+so candidates are inline — no trickle) → `phone→PC 'A'` answer (sendonly, after its
+gathering). Then DTLS‑SRTP media over UDP.
+
 ## Migration strategy (no bandaids, no breakage)
 
 - **Parallel, not rip‑and‑replace.** RTSP and SRT modes keep working through the
@@ -78,7 +85,7 @@ This reuses the pairing pattern we already have (PCAM1/PCAM2), just carrying SDP
 |---|---|---|
 | 0 | ✅ DONE. Deps + build: libdatachannel (`WITH_WEBRTC`) links into the receiver; WebRTC SDK gradle dep on Android — branch APK build green. | Me / CI |
 | 1a | ✅ DONE. DTLS‑SRTP media loopback (`webrtc_loopback.exe`): two peers, LAN host candidates, Opus RTP flows (45/50). Biggest transport de‑risk. | Me |
-| 1b | Signaling: `PCAM3` QR + TCP SDP offer/answer exchange, `pairSecret`‑gated, on both ends. | Me (loopback) |
+| 1b | ✅ DONE. `PCAM3` TCP SDP offer/answer exchange, `pairSecret`‑gated (`webrtc_signaling.exe`): full handshake + WebRTC media over a real socket (40/50 RTP). | Me |
 | 2 | PC receiver: libdatachannel peer accepts an **Opus audio** track → FFmpeg Opus decode → existing WASAPI/CABLE sink. Validate against a browser/Pion test sender. | **Me** (browser ↔ PC) |
 | 3 | Phone sender: WebRTC Android peer captures mic → Opus → audio track; connects via the signaling channel. | Tester device |
 | 4 | Mic‑only end‑to‑end + measure latency & battery on the tester's phone vs SRT. Go/no‑go on the numbers. | Tester device |

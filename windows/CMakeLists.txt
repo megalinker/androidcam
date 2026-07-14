@@ -73,6 +73,9 @@ if(WITH_WEBRTC)
     # Phase 1 de-risk: in-process DTLS-SRTP media loopback.
     add_executable(webrtc_loopback src/webrtc_loopback.cpp)
     target_link_libraries(webrtc_loopback PRIVATE LibDataChannel::LibDataChannel)
+    # Phase 1b: PCAM3 TCP signaling (SDP offer/answer over the wire) + full WebRTC bring-up.
+    add_executable(webrtc_signaling src/webrtc_signaling.cpp)
+    target_link_libraries(webrtc_signaling PRIVATE LibDataChannel::LibDataChannel ws2_32)
     message(STATUS "WebRTC path enabled (libdatachannel)")
 endif()
 
