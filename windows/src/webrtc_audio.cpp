@@ -28,6 +28,7 @@ extern "C" {
 using namespace std::chrono_literals;
 
 static std::atomic<bool> g_recvConnected{false}, g_sendConnected{false};
+static std::atomic<bool> g_sendDone{false};
 static std::atomic<int>  g_rtpIn{0}, g_framesDecoded{0};
 static double g_energy = 0.0;   // sum of squares of decoded samples
 static long   g_samples = 0;
@@ -157,12 +158,13 @@ int main() {
             }
             av_frame_free(&fr);
             printf("[sender] done sending\n");
+            g_sendDone = true;
         });
     });
 
     receiver->setLocalDescription();
 
-    for (int i = 0; i < 120 && g_framesDecoded < 90; i++) std::this_thread::sleep_for(100ms);
+    for (int i = 0; i < 150 && (g_framesDecoded < 90 || !g_sendDone); i++) std::this_thread::sleep_for(100ms);
 
     double rms = g_samples ? std::sqrt(g_energy / g_samples) : 0.0;
     printf("\n=== RESULT ===\n");
@@ -172,6 +174,12 @@ int main() {
     printf("decoded samples:  %ld  RMS=%.4f (tone should be ~0.2)\n", g_samples, rms);
     bool ok = g_recvConnected && g_framesDecoded >= 90 && rms > 0.05;
     printf("AUDIO %s\n", ok ? "PASS" : "FAIL");
-    avcodec_free_context(&encCtx); avcodec_free_context(&decCtx);
+    sender->close(); receiver->close();
+    keep.reset(); rtrack.reset(); sender.reset(); receiver.reset();
+    std::this_thread::sleep_for(100ms);
+    {
+        std::lock_guard<std::mutex> lock(g_decMutex);
+        avcodec_free_context(&encCtx); avcodec_free_context(&decCtx);
+    }
     return ok ? 0 : 1;
 }

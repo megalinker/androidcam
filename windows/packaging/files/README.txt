@@ -1,87 +1,44 @@
 ========================================================================
- PhoneCam - use your Android phone as a webcam on Windows (camera only)
+ PhoneCam 0.5.0 - Android camera and low-latency microphone for Windows
 ========================================================================
 
 WHAT YOU NEED
   - Windows 10 or 11 (64-bit)
   - An Android phone
-  - Both on the same Wi-Fi   (OR a USB cable - see "USB" below)
+  - Both devices on the same local network
+  - VB-CABLE for microphone output: https://vb-audio.com/Cable/
 
-------------------------------------------------------------------------
- IF YOU DOWNLOADED THIS AS A ZIP: unblock it first
-------------------------------------------------------------------------
-  Right-click the .zip -> Properties -> tick "Unblock" -> OK, THEN extract.
-  Extract it to a place it can STAY (e.g. C:\PhoneCam) - not a temp folder.
-  (Windows may still warn "unknown publisher" - this app isn't signed.
-   Click "More info" -> "Run anyway".)
+FIRST-TIME SETUP
+  1. Install PhoneCam.apk on the phone and allow camera/microphone access.
+  2. Open PhoneCam on Windows.
+  3. Select Wi-Fi - scan QR and leave the default Mic - low latency mode.
+  4. Press Start, then scan the displayed QR with the phone app.
+  5. In your call app, choose CABLE Output as the microphone.
 
-------------------------------------------------------------------------
- ON THE PHONE (once)
-------------------------------------------------------------------------
-  1. Copy PhoneCam.apk to the phone and tap it to install.
-     (You may need to allow "Install unknown apps" for your file manager.)
-  2. Open PhoneCam, choose "Camera + Mic" or "Camera only", press Start,
-     and allow the camera permission. It shows an address like:
-         rtsp://192.168.0.101:8554/
-     Leave it running.
+The phone's mic uses WebRTC with Opus and authenticated DTLS-SRTP encryption.
+Pairing and media stay on your LAN; there is no cloud signaling service.
 
-------------------------------------------------------------------------
- ON THE PC
-------------------------------------------------------------------------
-  1. Add the camera to Windows (once per PC):
-       - Installer (Setup.exe): already done - skip this step.
-       - Portable (zip): double-click  1-Install-Camera.bat  (say YES to admin).
-  2. Open  PhoneCam  (the app / Start-menu shortcut, or PhoneCam.exe in the zip).
-     In the window: pick "USB cable" or "Wi-Fi" (type the address the phone
-     shows), then click Start.
-  3. Open Zoom / Teams / Meet / Discord / OBS and pick the camera named
-       "PhoneCam Camera".  That's it - your phone is now the webcam.
+RECONNECTING
+  After the first scan, the phone shows Reconnect. Either side may be started
+  first: the phone retries the saved PC endpoint while it waits for the Windows
+  app to begin listening.
 
-  Close the PhoneCam window to stop. (Prefer the command line? PhoneCam.bat
-  and bin\phonecam.ps1 take the same options.)
+CAMERA MODE
+  In the Windows Wi-Fi mode list, choose Camera - standard. Press Start and scan
+  the QR. In Zoom, Teams, Meet, Discord, or OBS choose PhoneCam Camera.
 
-------------------------------------------------------------------------
- USB instead of Wi-Fi (optional, more reliable, no typing an address)
-------------------------------------------------------------------------
-  On the phone enable Developer Options -> USB debugging, plug it in, tap
-  "Allow" when asked. Then just double-click PhoneCam.bat - it starts the
-  phone app and connects automatically. (Great if Wi-Fi is blocked by a
-  VPN or a "guest"/isolated network.)
+TROUBLESHOOTING
+  - A full-tunnel VPN can hide LAN devices. Disable it or enable Allow LAN traffic
+    on both the phone and PC.
+  - Avoid guest Wi-Fi or access-point isolation.
+  - The Windows Camera app may not list the DirectShow camera; conferencing apps do.
+  - The installer and portable builds are unsigned, so Windows may show an
+    Unknown publisher warning.
 
-------------------------------------------------------------------------
- MICROPHONE (optional) - use the phone's mic in apps too
-------------------------------------------------------------------------
-  This is camera by default. To also pipe the phone's microphone into apps:
-  1. Install the free, signed "VB-CABLE" driver: https://vb-audio.com/Cable/
-     (installs on any PC, Secure Boot stays on).
-  2. Start with the -Mic option:   PhoneCam.bat -Mic
-  3. In Zoom/Teams/Discord, pick "CABLE Output (VB-Audio Virtual Cable)" as the
-     microphone.
-  (Optional: to show it as "PhoneCam Microphone", rename it once in
-   Windows Sound settings -> Recording -> CABLE Output -> Properties -> Rename.)
-
-------------------------------------------------------------------------
- IMAGE FLIP (optional)
-------------------------------------------------------------------------
-  Mirror the picture if it looks reversed:
-     PhoneCam.bat -FlipH        (left/right)   PhoneCam.bat -FlipV   (up/down)
-
-------------------------------------------------------------------------
- NOTES / TROUBLESHOOTING
-------------------------------------------------------------------------
-  - "PhoneCam Camera" shows up in Zoom/Teams/OBS/Discord/Chrome, but NOT
-    in the built-in Windows "Camera" app (that app uses a different system).
-  - The picture is black until PhoneCam.bat is running and connected.
-  - Can't connect over Wi-Fi? Make sure the PC and phone are on the SAME
-    network, the phone app is streaming, and turn OFF any VPN on either
-    device. Some routers block devices from seeing each other ("AP
-    isolation"/guest Wi-Fi) - use a normal network, or use USB.
-  - Audio (mic) is NOT included - this is the camera only.
-  - To remove it later: double-click 2-Uninstall-Camera.bat.
-
-  Files here:
-    PhoneCam.bat            - run this to start
-    1-Install-Camera.bat    - run once to add the camera (admin)
-    2-Uninstall-Camera.bat  - remove the camera (admin)
-    PhoneCam.apk            - the Android app
-    bin\, redist\           - program files (leave them alone)
+FILES
+  PhoneCam.exe            - desktop app
+  PhoneCam.apk            - Android app
+  PhoneCam.bat            - command-line RTSP camera fallback
+  1-Install-Camera.bat    - register the camera (portable build)
+  2-Uninstall-Camera.bat  - remove the camera registration
+  bin\, redist\           - application files

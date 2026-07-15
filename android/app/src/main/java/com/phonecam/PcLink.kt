@@ -25,24 +25,7 @@ data class PcTarget(val host: String, val port: Int, val token: String) {
 }
 
 /**
- * Encrypted (SRT) pairing. Here the direction flips: the PC runs an SRT *listener* and the phone
- * *pushes* an AES-encrypted stream to it, so the QR carries the PC's endpoint + a passphrase.
- */
-data class SrtTarget(val host: String, val port: Int, val passphrase: String) {
-    companion object {
-        /** Parse "PCAM2:<host>:<port>:<passphrase>" (passphrase is hex, so ':' stays a safe delimiter). */
-        fun parse(raw: String?): SrtTarget? {
-            val parts = raw?.trim()?.split(":") ?: return null
-            if (parts.size != 4 || parts[0] != "PCAM2") return null
-            val port = parts[2].toIntOrNull() ?: return null
-            if (parts[1].isEmpty() || parts[3].isEmpty() || port !in 1..65535) return null
-            return SrtTarget(parts[1], port, parts[3])
-        }
-    }
-}
-
-/**
- * WebRTC (PCAM3) pairing. Like SRT, the phone connects out to the PC — but here the QR carries the
+ * WebRTC (PCAM3) pairing. The phone connects out to the PC; the QR carries the
  * PC's TCP *signaling* endpoint + a pairSecret; over that channel the two exchange SDP offer/answer
  * (DTLS-SRTP fingerprints + LAN host candidates) and media then flows LAN-direct over UDP.
  */

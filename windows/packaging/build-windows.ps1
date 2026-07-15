@@ -5,13 +5,26 @@
 #>
 param(
   [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
-  [string]$Toolset = ''    # e.g. 'v143' on VS2022 CI; empty keeps the project default
+  [string]$Toolset = '',   # e.g. 'v143' on VS2022 CI; empty keeps the project default
+  [string]$VcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $win = Join-Path $RepoRoot 'windows'
 $tp  = Join-Path $win 'third_party'
+
+if (-not $VcpkgRoot) {
+  $candidate = Join-Path $HOME 'vcpkg'
+  if (Test-Path (Join-Path $candidate 'vcpkg.exe')) { $VcpkgRoot = $candidate }
+}
+$vcpkg = if ($VcpkgRoot) { Join-Path $VcpkgRoot 'vcpkg.exe' } else { $null }
+if (-not $vcpkg -or -not (Test-Path $vcpkg)) { throw 'vcpkg.exe not found; set VCPKG_INSTALLATION_ROOT or pass -VcpkgRoot.' }
+
+Write-Host '== WebRTC dependencies (libdatachannel + OpenSSL-backed SRTP) =='
+$overlay = Join-Path $win 'vcpkg-overlays'
+& $vcpkg install 'libdatachannel[core,srtp,ws]:x64-windows' 'libsrtp[openssl]:x64-windows' "--overlay-ports=$overlay"
+if ($LASTEXITCODE) { throw 'vcpkg WebRTC dependency install failed' }
 
 Write-Host '== FFmpeg shared SDK =='
 $ff = Join-Path $tp 'ffmpeg'
@@ -43,11 +56,16 @@ foreach ($plat in 'x64','Win32') {
   if ($LASTEXITCODE) { throw "softcam $plat build failed" }
 }
 
-Write-Host '== receiver (softcam-enabled) =='
+Write-Host '== receiver (softcam + WebRTC enabled) =='
 $scLib = Join-Path $sc 'src\softcamcore\x64\Release\softcamcore.lib'
 $bld = Join-Path $win 'build'
-cmake -S $win -B $bld -A x64 -DWITH_SOFTCAM=ON "-DSOFTCAM_ROOT=$sc" "-DSOFTCAM_LIB=$scLib"
+cmake -S $win -B $bld -A x64 -DWITH_SOFTCAM=ON -DWITH_WEBRTC=ON `
+  "-DSOFTCAM_ROOT=$sc" "-DSOFTCAM_LIB=$scLib" `
+  "-DCMAKE_TOOLCHAIN_FILE=$(Join-Path $VcpkgRoot 'scripts\buildsystems\vcpkg.cmake')"
 if ($LASTEXITCODE) { throw 'cmake configure failed' }
 cmake --build $bld --config Release
 if ($LASTEXITCODE) { throw 'receiver build failed' }
+foreach ($name in 'datachannel.dll','juice.dll','srtp2.dll','libcrypto-3-x64.dll','libssl-3-x64.dll') {
+  if (-not (Test-Path (Join-Path $bld "Release\$name"))) { throw "WebRTC runtime missing after build: $name" }
+}
 Write-Host 'Windows build complete.'

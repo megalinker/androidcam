@@ -13,8 +13,8 @@ android {
         applicationId = "com.phonecam"
         minSdk = 21
         targetSdk = 34
-        versionCode = 31
-        versionName = "0.5.0-webrtc.1"
+        versionCode = 32
+        versionName = "0.5.0"
     }
 
     // Release signing: CI decodes the keystore secret to a file and points these env vars at it,
@@ -74,7 +74,6 @@ dependencies {
     implementation("com.github.pedroSG94.RootEncoder:library:2.7.2")
 
     // WebRTC media stack (org.webrtc.*) — Phase 0 of the WebRTC migration (docs/webrtc-migration.md).
-    // Pre-built, maintained; handles Oboe/AAudio capture, Opus/H264, DTLS-SRTP. Coexists with RootEncoder
-    // during the parallel migration.
+    // Pre-built, maintained; handles Oboe/AAudio capture, Opus/H264, and DTLS-SRTP.
     implementation("io.getstream:stream-webrtc-android:1.3.10")
 }

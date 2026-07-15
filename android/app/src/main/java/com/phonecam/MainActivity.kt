@@ -45,7 +45,6 @@ class MainActivity : AppCompatActivity() {
 
     // Wi-Fi pairing: the PC target from the last scanned QR, held across the permission prompt.
     private var pendingTarget: PcTarget? = null
-    private var pendingSrt: SrtTarget? = null   // same, for an encrypted (SRT) code
     private var pendingWebrtc: WebrtcTarget? = null   // same, for a WebRTC (PCAM3) code
     // A note shown in the status card while streaming but not yet connected (e.g. announce failed).
     private var pairingNote: String? = null
@@ -82,7 +81,7 @@ class MainActivity : AppCompatActivity() {
             else if (ensurePermissions()) startStreaming()
         }
         findViewById<MaterialButton>(R.id.scanBtn).setOnClickListener { launchScan() }
-        findViewById<MaterialButton>(R.id.reconnectBtn).setOnClickListener { reconnectSrt() }
+        findViewById<MaterialButton>(R.id.reconnectBtn).setOnClickListener { reconnectWebrtc() }
         urlText.setOnClickListener { copyUrl() }
         findViewById<MaterialButton>(R.id.switchCamBtn).setOnClickListener { switchCamera() }
     }
@@ -110,16 +109,6 @@ class MainActivity : AppCompatActivity() {
             if (ensurePermissions()) beginWebrtc()
             return
         }
-        if (payload.trim().startsWith("PCAM2:")) {                 // encrypted (SRT) code
-            val srt = SrtTarget.parse(payload)
-            if (srt == null) {
-                Toast.makeText(this, "That isn't a valid PhoneCam code.", Toast.LENGTH_SHORT).show()
-                return
-            }
-            pendingSrt = srt
-            if (ensurePermissions()) beginSrt()
-            return
-        }
         val target = PcTarget.parse(payload)
         if (target == null) {
             Toast.makeText(this, "That isn't a PhoneCam PC code.", Toast.LENGTH_SHORT).show()
@@ -127,16 +116,6 @@ class MainActivity : AppCompatActivity() {
         }
         pendingTarget = target
         if (ensurePermissions()) beginPairing()   // else resumed from onRequestPermissionsResult
-    }
-
-    /** Encrypted mode: push an SRT stream to the scanned PC. No announce-back — the phone connects out. */
-    private fun beginSrt() {
-        val srt = pendingSrt ?: return
-        pendingSrt = null
-        pairingNote = null
-        saveSrtTarget(srt)   // remember this PC so the "Reconnect" button can skip the QR next time
-        if (!StreamService.isRunning) startSrtStreaming(srt)
-        Toast.makeText(this, "Connecting (encrypted) to ${srt.host}…", Toast.LENGTH_SHORT).show()
     }
 
     /** WebRTC mode (mic-only): answer the scanned PC's PCAM3 offer. Phone connects out; no announce-back. */
@@ -149,18 +128,14 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(this, "Connecting (WebRTC) to ${wr.host}…", Toast.LENGTH_SHORT).show()
     }
 
-    /** One-tap reconnect to the last encrypted PC — no QR. Uses whichever transport was last paired. */
-    private fun reconnectSrt() {
-        when (prefs.getString(KEY_LAST_TRANSPORT, null)) {
-            "webrtc" -> savedWebrtcTarget()?.let { pendingWebrtc = it; if (ensurePermissions()) beginWebrtc() }
-            else -> savedSrtTarget()?.let { pendingSrt = it; if (ensurePermissions()) beginSrt() }
-        }
+    /** One-tap reconnect to the last WebRTC PC — no QR. */
+    private fun reconnectWebrtc() {
+        savedWebrtcTarget()?.let { pendingWebrtc = it; if (ensurePermissions()) beginWebrtc() }
     }
 
     private fun saveWebrtcTarget(wr: WebrtcTarget) {
         prefs.edit()
             .putString(KEY_SIG_HOST, wr.host).putInt(KEY_SIG_PORT, wr.port).putString(KEY_SIG_SECRET, wr.secret)
-            .putString(KEY_LAST_TRANSPORT, "webrtc")
             .apply()
     }
 
@@ -183,38 +158,6 @@ class MainActivity : AppCompatActivity() {
             putExtra(StreamService.EXTRA_SIG_HOST, wr.host)
             putExtra(StreamService.EXTRA_SIG_PORT, wr.port)
             putExtra(StreamService.EXTRA_SIG_SECRET, wr.secret)
-        }
-        ContextCompat.startForegroundService(this, intent)
-    }
-
-    private fun saveSrtTarget(srt: SrtTarget) {
-        prefs.edit()
-            .putString(KEY_SRT_HOST, srt.host).putInt(KEY_SRT_PORT, srt.port).putString(KEY_SRT_PASS, srt.passphrase)
-            .putString(KEY_LAST_TRANSPORT, "srt")
-            .apply()
-    }
-
-    private fun savedSrtTarget(): SrtTarget? {
-        val host = prefs.getString(KEY_SRT_HOST, null) ?: return null
-        val pass = prefs.getString(KEY_SRT_PASS, null) ?: return null
-        val port = prefs.getInt(KEY_SRT_PORT, 0)
-        if (host.isEmpty() || pass.isEmpty() || port !in 1..65535) return null
-        return SrtTarget(host, port, pass)
-    }
-
-    private fun startSrtStreaming(srt: SrtTarget) {
-        prefs.edit()
-            .putString(KEY_MODE, selectedMode().name)
-            .putString(KEY_QUALITY, selectedQuality().name)
-            .apply()
-        val intent = Intent(this, StreamService::class.java).apply {
-            action = StreamService.ACTION_START
-            putExtra(StreamService.EXTRA_MODE, selectedMode().name)
-            putExtra(StreamService.EXTRA_QUALITY, selectedQuality().name)
-            putExtra(StreamService.EXTRA_TRANSPORT, "srt")
-            putExtra(StreamService.EXTRA_SRT_HOST, srt.host)
-            putExtra(StreamService.EXTRA_SRT_PORT, srt.port)
-            putExtra(StreamService.EXTRA_SRT_PASS, srt.passphrase)
         }
         ContextCompat.startForegroundService(this, intent)
     }
@@ -326,9 +269,9 @@ class MainActivity : AppCompatActivity() {
         val running = StreamService.isRunning
         startBtn.text = if (running) "Stop streaming" else "Start streaming"
         findViewById<View>(R.id.scanBtn).visibility = if (running) View.GONE else View.VISIBLE
-        // One-tap reconnect: only useful when idle and we've paired with an encrypted PC before (SRT or WebRTC).
+        // One-tap reconnect: only useful when idle and we've paired with a WebRTC PC before.
         findViewById<View>(R.id.reconnectBtn).visibility =
-            if (!running && (savedSrtTarget() != null || savedWebrtcTarget() != null)) View.VISIBLE else View.GONE
+            if (!running && savedWebrtcTarget() != null) View.VISIBLE else View.GONE
         statusCard.visibility = if (running) View.VISIBLE else View.GONE
         idleHint.visibility = if (running) View.GONE else View.VISIBLE
 
@@ -396,12 +339,11 @@ class MainActivity : AppCompatActivity() {
         if (camOk && micOk) {
             when {
                 pendingWebrtc != null -> beginWebrtc()
-                pendingSrt != null -> beginSrt()
                 pendingTarget != null -> beginPairing()
                 else -> startStreaming()
             }
         } else {
-            pendingTarget = null; pendingSrt = null; pendingWebrtc = null
+            pendingTarget = null; pendingWebrtc = null
             pcStatus.text = "Camera and microphone permissions are required."
         }
     }
@@ -415,12 +357,8 @@ class MainActivity : AppCompatActivity() {
         private const val REQ_PERMS = 1
         private const val KEY_MODE = "mode"
         private const val KEY_QUALITY = "quality"
-        private const val KEY_SRT_HOST = "srtHost"
-        private const val KEY_SRT_PORT = "srtPort"
-        private const val KEY_SRT_PASS = "srtPass"
         private const val KEY_SIG_HOST = "sigHost"
         private const val KEY_SIG_PORT = "sigPort"
         private const val KEY_SIG_SECRET = "sigSecret"
-        private const val KEY_LAST_TRANSPORT = "lastTransport"
     }
 }

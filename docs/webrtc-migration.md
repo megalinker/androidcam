@@ -62,7 +62,7 @@ The SDP is too big and dynamic for the QR alone, so the QR only **bootstraps**:
    fingerprints ARE the pinned identity; `pairSecret` gates the exchange (MITM
    resistance without a CA).
 
-This reuses the pairing pattern we already have (PCAM1/PCAM2), just carrying SDP.
+This reuses the original PCAM1 pairing pattern, with PCAM3 carrying the WebRTC bootstrap.
 
 **Wire protocol** (proven in Phase 1b, `webrtc_signaling.cpp`; the phone mirrors it in
 Kotlin): length‑prefixed messages `[1 byte type][4‑byte big‑endian length][payload]`,
@@ -73,9 +73,9 @@ gathering). Then DTLS‑SRTP media over UDP.
 
 ## Migration strategy (no bandaids, no breakage)
 
-- **Parallel, not rip‑and‑replace.** RTSP and SRT modes keep working through the
-  whole migration. WebRTC ships as a third mode, becomes default only once it's
-  proven on the tester's hardware, and the old paths are removed last.
+- **Validated before retirement.** RTSP and SRT remained available through the
+  hardware gate. WebRTC became the default mic path only after it passed; RTSP
+  remains for camera compatibility and SRT is retired in v0.5.0.
 - **Mic‑only first.** It's the cleanest win (all three fronts improve, no video
   complexity, and it deletes the dummy‑video‑encoder hack). Video track second.
 
@@ -88,25 +88,26 @@ gathering). Then DTLS‑SRTP media over UDP.
 | 1b | ✅ DONE. `PCAM3` TCP SDP offer/answer exchange, `pairSecret`‑gated (`webrtc_signaling.exe`): full handshake + WebRTC media over a real socket (40/50 RTP). | Me |
 | 2a | ✅ DONE. Codec bridge (`webrtc_audio.exe`): libopus‑encoded tone → RTP → FFmpeg Opus decode, decoded PCM RMS=0.21 matches the tone. RTP header parse handles CSRC+extensions. | Me |
 | 2b | ✅ DONE. `receiver.exe --webrtc` (webrtc_receiver.cpp): PCAM3 signaling server + offerer + RTP→Opus decode → audio thread → `WasapiSink`. Verified with `webrtc_testsender.exe` (phone stand-in, real Opus): recorded CABLE Output shows a steady −18 dB tone for the full 6 s, no dropouts. | Me |
-| 3 | ✅ CODE DONE (awaiting tester runtime check). Phone `WebRtcSender.kt` (org.webrtc): PCAM3 client, answers the PC's recvonly offer with a sendonly mic Opus track. GUI: "Wi-Fi transport" dropdown (Standard/Encrypted/Low-latency⚡) launches `receiver.exe --webrtc` + PCAM3 QR. Both sides compile; CI APK green (0.5.0-webrtc.1). First real phone→PC WebRTC audio needs the tester's device. | Tester device |
-| 4 | Mic‑only end‑to‑end + measure latency & battery on the tester's phone vs SRT. Go/no‑go on the numbers. | Tester device |
+| 3 | ✅ DONE. Real Pixel 10 Pro test: PCAM3 offer/answer, ICE, DTLS-SRTP, Opus mic capture, first RTP, CABLE render, GUI live status, and mic meter all pass on `0.5.0-webrtc.1`. A full-tunnel phone VPN must allow LAN traffic or be disconnected. | Tester device |
+| 4 | ✅ LATENCY GATE PASSED. Same phone/room/Wi-Fi/speakers: SRT `357.7 ± 17.0 ms` (median `360.4`, n=26) vs WebRTC `166.3 ± 26.1 ms` (median `166.9`, n=19). WebRTC wins by `191.4 ms` mean / `193.5 ms` median, a 53.5% reduction. Battery comparison remains optional follow-up. | Tester device |
 | 5 | Add **H.264 video** track both ends → full webcam. | Tester device |
-| 6 | Make WebRTC the default, keep RTSP as the compatibility fallback, retire SRT. | Tester device |
+| 6 | ✅ DONE for v0.5.0. WebRTC is the default mic-only mode, RTSP is the camera compatibility fallback, and PCAM2/SRT is retired. Phone-first reconnect now retries until the PC listener starts. | Tester device |
 
-Gate: after Phase 4 we look at real numbers. If WebRTC doesn't beat SRT on the
-tester's hardware, we stop and keep SRT — the parallel strategy means that costs
-us nothing already shipped.
+Gate result: **GO** on the Pixel 10 Pro. WebRTC beat SRT by 191.4 ms mean
+end-to-end acoustic latency (53.5%). RTSP remains the camera fallback.
 
 ## Benchmarking (before/after — drives the Phase‑4 gate)
 
 Both transports get measured under identical conditions (same phone, mode,
 quality, room, Wi‑Fi), SRT first (baseline), WebRTC after.
 
-- **Latency — `latbench.exe`** ✅ BUILT (`windows/src/latbench.cpp`, WASAPI-only). Self-test
-  (`--selftest`, clicks → CABLE Input → CABLE Output, no phone) matched 10/10 at 27.7 ms mean /
-  0.3 ms stddev — that's the digital CABLE+WASAPI floor, common to both runs so it cancels in the
+- **Latency — `latbench.exe`** ✅ VALIDATED (`windows/src/latbench.cpp`, WASAPI-only). Self-test
+  (`--selftest`, clicks → CABLE Input → CABLE Output, no phone) correlated 9/10 at 20.2 ms mean /
+  0.0 ms stddev — that's the digital CABLE+WASAPI floor, common to both runs so it cancels in the
   delta. Real run: just `latbench.exe` (clicks out the speakers, phone streaming into CABLE).
-  opens a WASAPI **loopback** capture of the default speakers AND a capture of
+  The matcher records both WASAPI streams and uses normalized probe-waveform correlation plus
+  median/MAD outlier rejection, so speech and unrelated PC audio do not become false click pairs.
+  `latbench` opens a WASAPI **loopback** capture of the default speakers AND a capture of
   **CABLE Output**, plays a click train through the speakers (phone mic hears it
   → streams back → lands in CABLE), and cross‑correlates the two channels per
   click. The gap = full mouth‑to‑virtual‑mic latency (capture + codec + transport

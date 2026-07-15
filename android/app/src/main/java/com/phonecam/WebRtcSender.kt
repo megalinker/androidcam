@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   [1 byte type][4-byte big-endian length][payload],  S = pairSecret, O = offer, A = answer.
  *
  * org.webrtc handles Oboe/AAudio low-latency capture, Opus, DTLS-SRTP and congestion control; we
- * only drive the signaling handshake and lifecycle. Coexists with the RTSP/SRT paths.
+ * only drive the signaling handshake and lifecycle. RTSP remains the camera compatibility path.
  */
 class WebRtcSender(
     private val appCtx: Context,
@@ -61,8 +61,10 @@ class WebRtcSender(
             try {
                 run()
             } catch (e: Exception) {
-                Log.e(TAG, "webrtc sender failed", e)
-                onState(State.FAILED)
+                if (!closed.get()) {
+                    Log.e(TAG, "webrtc sender failed", e)
+                    onState(State.FAILED)
+                }
                 stop()
             }
         }.apply { isDaemon = true; name = "webrtc-sender"; start() }
@@ -100,13 +102,11 @@ class WebRtcSender(
         peer.addTrack(track, listOf("pcam"))
 
         // --- signaling handshake over TCP ---
-        val s = Socket()
-        s.tcpNoDelay = true
-        s.connect(InetSocketAddress(host, port), 5000)
-        socket = s
+        onState(State.CONNECTING)
+        val s = connectSignaling()
+        if (closed.get()) return
         val out = DataOutputStream(s.getOutputStream())
         val inp = DataInputStream(s.getInputStream())
-        onState(State.CONNECTING)
         sendMsg(out, 'S', secret.toByteArray(Charsets.UTF_8))
 
         val (type, payload) = recvMsg(inp) ?: throw IllegalStateException("no offer from PC")
@@ -144,6 +144,7 @@ class WebRtcSender(
     fun stop() {
         if (!closed.compareAndSet(false, true)) return
         runCatching { socket?.close() }
+        worker?.interrupt()
         // Tear down WebRTC off the caller's thread — dispose() blocks on WebRTC's threads.
         Thread {
             runCatching { pc?.dispose() }
@@ -152,6 +153,25 @@ class WebRtcSender(
             runCatching { adm?.release() }
             pc = null; audioTrack = null; audioSource = null; adm = null; factory = null
         }.apply { isDaemon = true }.start()
+    }
+
+    /** Keep a saved-PC reconnect alive when the phone starts before the desktop listener. */
+    private fun connectSignaling(): Socket {
+        while (!closed.get()) {
+            val candidate = Socket().apply { tcpNoDelay = true }
+            socket = candidate
+            try {
+                candidate.connect(InetSocketAddress(host, port), SIGNAL_CONNECT_TIMEOUT_MS)
+                Log.i(TAG, "webrtc: signaling connected to $host:$port")
+                return candidate
+            } catch (e: Exception) {
+                runCatching { candidate.close() }
+                if (closed.get()) break
+                Log.i(TAG, "webrtc: PC not listening yet; retrying")
+                Thread.sleep(SIGNAL_RETRY_MS)
+            }
+        }
+        throw InterruptedException("WebRTC sender stopped")
     }
 
     // --- PeerConnection.Observer ---
@@ -235,6 +255,8 @@ class WebRtcSender(
 
     companion object {
         private const val TAG = "PhoneCam"
+        private const val SIGNAL_CONNECT_TIMEOUT_MS = 3000
+        private const val SIGNAL_RETRY_MS = 2000L
         private val factoryInited = AtomicBoolean(false)
 
         /** PeerConnectionFactory.initialize must run once per process before any factory is built. */

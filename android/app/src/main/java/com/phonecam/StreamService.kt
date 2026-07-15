@@ -24,9 +24,7 @@ import com.pedro.encoder.input.sources.audio.NoAudioSource
 import com.pedro.encoder.input.sources.video.BitmapSource
 import com.pedro.encoder.input.sources.video.Camera2Source
 import com.pedro.encoder.input.sources.video.VideoSource
-import com.pedro.library.srt.SrtStream
 import com.pedro.rtspserver.RtspServerStream
-import com.pedro.srt.srt.packets.control.handshake.EncryptionType
 import com.pedro.rtspserver.server.ClientListener
 import com.pedro.rtspserver.server.ServerClient
 
@@ -57,19 +55,14 @@ class StreamService : Service(), ConnectChecker {
         const val ACTION_SWITCH_CAMERA = "com.phonecam.action.SWITCH_CAMERA"
         const val EXTRA_MODE = "mode"
         const val EXTRA_QUALITY = "quality"
-        // Transport: "rtsp" (default, phone = server), "srt" (phone pushes AES-encrypted to the PC),
-        // or "webrtc" (phone answers the PC's PCAM3 offer with a sendonly Opus mic track — mic-only,
+        // Transport: "rtsp" (default, phone = server) or "webrtc" (phone answers the PC's PCAM3
+        // offer with a sendonly Opus mic track — mic-only,
         // Phase 3 of docs/webrtc-migration.md).
         const val EXTRA_TRANSPORT = "transport"
-        const val EXTRA_SRT_HOST = "srtHost"
-        const val EXTRA_SRT_PORT = "srtPort"
-        const val EXTRA_SRT_PASS = "srtPass"
         // WebRTC signaling target (PCAM3 QR).
         const val EXTRA_SIG_HOST = "sigHost"
         const val EXTRA_SIG_PORT = "sigPort"
         const val EXTRA_SIG_SECRET = "sigSecret"
-        const val SRT_LATENCY_MS = 120   // SRT receive buffer; recovers loss, keeps latency low on a LAN
-
         const val PORT = 8554
         // A tiny control port: the PC connects and sends "PCAM-STOP" so pressing Stop on the PC stops
         // the phone at once, instead of leaving it waiting for a reconnect. Only a deliberate PC-side
@@ -140,9 +133,7 @@ class StreamService : Service(), ConnectChecker {
     }
 
     private var stream: RtspServerStream? = null
-    private var srtStream: SrtStream? = null
     private var webrtcSender: WebRtcSender? = null
-    @Volatile private var isSrt = false   // current transport, so the ConnectChecker callbacks know what they mean
     private var wakeLock: PowerManager.WakeLock? = null
     private var controlServer: java.net.ServerSocket? = null
 
@@ -180,25 +171,20 @@ class StreamService : Service(), ConnectChecker {
         val quality = intent?.getStringExtra(EXTRA_QUALITY)?.let { runCatching { Quality.valueOf(it) }.getOrNull() }
             ?: DEFAULT_QUALITY
         val transport = intent?.getStringExtra(EXTRA_TRANSPORT) ?: "rtsp"
-        val srtHost = intent?.getStringExtra(EXTRA_SRT_HOST)
-        val srtPort = intent?.getIntExtra(EXTRA_SRT_PORT, 0) ?: 0
-        val srtPass = intent?.getStringExtra(EXTRA_SRT_PASS)
         val sigHost = intent?.getStringExtra(EXTRA_SIG_HOST)
         val sigPort = intent?.getIntExtra(EXTRA_SIG_PORT, 0) ?: 0
         val sigSecret = intent?.getStringExtra(EXTRA_SIG_SECRET)
 
         // WebRTC is mic-only for now (Phase 3); force the mic foreground type regardless of the toggle.
         startForegroundForMode(if (transport == "webrtc") Mode.MIC_ONLY else mode)
-        startStreaming(mode, quality, transport, srtHost, srtPort, srtPass, sigHost, sigPort, sigSecret)
+        startStreaming(mode, quality, transport, sigHost, sigPort, sigSecret)
         return START_STICKY
     }
 
     private fun startStreaming(mode: Mode, quality: Quality, transport: String,
-                               srtHost: String?, srtPort: Int, srtPass: String?,
                                sigHost: String?, sigPort: Int, sigSecret: String?) {
         if (isRunning) return
         clientConnected = false; everConnected = false
-        isSrt = transport == "srt"
 
         // WebRTC (mic-only) takes a wholly separate path — org.webrtc, not RootEncoder.
         if (transport == "webrtc") { startWebrtcStreaming(sigHost, sigPort, sigSecret); return }
@@ -213,9 +199,6 @@ class StreamService : Service(), ConnectChecker {
         else
             Camera2Source(this)
         val audio: AudioSource = if (mode == Mode.CAMERA_ONLY) NoAudioSource() else MicrophoneSource()
-
-        // Encrypted transport is handled separately (phone pushes to the PC); the RTSP path below is unchanged.
-        if (isSrt) { startSrtStreaming(mode, quality, srtHost, srtPort, srtPass, video, audio); return }
 
         try {
             // Phone = RTSP server. Constructor arg order is (context, PORT, connectChecker, video, audio).
@@ -290,54 +273,6 @@ class StreamService : Service(), ConnectChecker {
     }
 
     /**
-     * Encrypted mode: build an SrtStream and push to the PC's SRT listener with an AES passphrase.
-     * The PC is the server here, so "connected" comes from the ConnectChecker callbacks (see below),
-     * not a client listener. Mirrors the RTSP prepare/mode logic; only the transport differs.
-     */
-    private fun startSrtStreaming(mode: Mode, quality: Quality, srtHost: String?, srtPort: Int,
-                                  srtPass: String?, video: VideoSource, audio: AudioSource) {
-        try {
-            val rotation = com.pedro.encoder.input.video.CameraHelper.getCameraOrientation(this)
-            val s = SrtStream(this, this, video, audio)
-            if (mode == Mode.MIC_ONLY) s.getStreamClient().setOnlyAudio(true)
-            if (mode == Mode.CAMERA_ONLY) s.getStreamClient().setOnlyVideo(true)
-            s.getStreamClient().setPassphrase(srtPass ?: "", EncryptionType.AES128)
-            s.getStreamClient().setLatency(SRT_LATENCY_MS)
-
-            val videoOk = if (mode == Mode.MIC_ONLY)
-                s.prepareVideo(MIC_ONLY_W, MIC_ONLY_H, MIC_ONLY_BITRATE, MIC_ONLY_FPS, I_FRAME_INTERVAL, rotation = rotation)
-            else
-                s.prepareVideo(quality.w, quality.h, quality.bitrate, quality.fps, I_FRAME_INTERVAL, rotation = rotation)
-            val audioOk = s.prepareAudio(AUDIO_SAMPLE_RATE, AUDIO_STEREO, AUDIO_BITRATE)
-            if (!videoOk || !audioOk) {
-                Log.e(TAG, "prepare failed (video=$videoOk audio=$audioOk) — try a lower Quality preset")
-                stopSelf(); return
-            }
-
-            // RootEncoder's SRT parser requires a /streamid path (srt://ip:port/streamid). The PC's
-            // FFmpeg listener doesn't filter on it, so any non-empty id works.
-            s.startStream("srt://$srtHost:$srtPort/phonecam")   // connect out to the PC and push (encrypted)
-            srtStream = s
-            streamUrl = "Encrypted → $srtHost"
-            isRunning = true
-            acquireWakeLock()
-            lastClientMs = SystemClock.elapsedRealtime()
-            idleHandler.postDelayed(idleCheck, IDLE_CHECK_MS)
-            // No control listener in SRT mode: when the PC stops, its listener closes and our
-            // connection drops -> onDisconnect stops us (see ConnectChecker below).
-            Log.i(TAG, "SRT push up ($mode, ${quality.label}) to srt://$srtHost:$srtPort")
-            updateNotification()
-        } catch (e: Exception) {
-            Log.e(TAG, "startSrtStreaming failed", e)
-            releaseWakeLock()
-            runCatching { srtStream?.stopStream() }
-            srtStream = null
-            isRunning = false
-            stopSelf()
-        }
-    }
-
-    /**
      * WebRTC mic-only: answer the PC's PCAM3 offer with a sendonly Opus track over DTLS-SRTP.
      * No RootEncoder, no camera, no dummy-video hack — org.webrtc captures the mic directly.
      * The PC is the offerer/listener, so "connected" comes from the WebRTC state callback.
@@ -359,7 +294,7 @@ class StreamService : Service(), ConnectChecker {
                     WebRtcSender.State.DISCONNECTED, WebRtcSender.State.FAILED -> {
                         clientConnected = false
                         Log.i(TAG, "webrtc: $state — stopping")
-                        idleHandler.post { stopStreaming() }   // PC gone → stop, mirroring SRT
+                        idleHandler.post { stopStreaming() }
                     }
                 }
             }
@@ -397,7 +332,7 @@ class StreamService : Service(), ConnectChecker {
 
     /** Toggle front/back camera on the running stream (no-op in mic-only mode). */
     private fun switchCamera() {
-        val cam = (stream?.videoSource ?: srtStream?.videoSource) as? Camera2Source ?: return
+        val cam = stream?.videoSource as? Camera2Source ?: return
         runCatching { cam.switchCamera() }.onFailure { Log.w(TAG, "switchCamera failed", it) }
     }
 
@@ -472,9 +407,8 @@ class StreamService : Service(), ConnectChecker {
         runCatching { controlServer?.close() }; controlServer = null   // unblocks the accept() loop
         releaseWakeLock()
         stream?.let { if (it.isStreaming) it.stopStream() }
-        runCatching { srtStream?.let { if (it.isStreaming) it.stopStream() } }
         runCatching { webrtcSender?.stop() }
-        stream = null; srtStream = null; webrtcSender = null; isSrt = false
+        stream = null; webrtcSender = null
         isRunning = false
         streamUrl = null
         clientConnected = false; everConnected = false
@@ -530,28 +464,14 @@ class StreamService : Service(), ConnectChecker {
         }
     }
 
-    // --- ConnectChecker (com.pedro.common). For a server these fire as clients attach/detach. ---
+    // --- ConnectChecker (com.pedro.common). For the RTSP server these describe encoder state. ---
     override fun onConnectionStarted(url: String) { Log.d(TAG, "connection starting: $url") }
-    override fun onConnectionSuccess() {
-        // In SRT mode these callbacks reflect the real PC connection (phone = client). In RTSP mode
-        // they're just our own encoder session, so "PC connected" comes from the ClientListener instead.
-        if (isSrt) {
-            clientConnected = true; everConnected = true; lastClientMs = SystemClock.elapsedRealtime()
-            Log.i(TAG, "SRT connected to PC")
-        } else Log.i(TAG, "encoder session ready")
-    }
+    override fun onConnectionSuccess() { Log.i(TAG, "encoder session ready") }
     override fun onConnectionFailed(reason: String) {
         Log.w(TAG, "connection failed: $reason")
-        if (isSrt) idleHandler.post { stopStreaming() }   // couldn't reach the PC listener — give up cleanly
     }
     override fun onNewBitrate(bitrate: Long) { /* hook for adaptive bitrate */ }
-    override fun onDisconnect() {
-        if (isSrt) {
-            clientConnected = false
-            Log.i(TAG, "SRT disconnected (PC stopped?) — stopping")
-            idleHandler.post { stopStreaming() }
-        } else Log.i(TAG, "encoder session ended")
-    }
+    override fun onDisconnect() { Log.i(TAG, "encoder session ended") }
     override fun onAuthError() { Log.w(TAG, "auth error") }
     override fun onAuthSuccess() { Log.d(TAG, "auth success") }
 }

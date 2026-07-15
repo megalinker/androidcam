@@ -17,6 +17,7 @@ foreach ($d in @('bin','bin\softcam\x64','bin\softcam\Win32','bin\adb','redist')
 $rel = Join-Path $win 'build\Release'
 Copy-Item (Join-Path $rel 'receiver.exe') (Join-Path $OutDir 'bin') -Force
 foreach ($d in 'avformat-63','avcodec-63','avutil-61','swscale-10','swresample-7') { Copy-Item (Join-Path $rel "$d.dll") (Join-Path $OutDir 'bin') -Force }
+foreach ($d in 'datachannel','juice','srtp2','libcrypto-3-x64','libssl-3-x64') { Copy-Item (Join-Path $rel "$d.dll") (Join-Path $OutDir 'bin') -Force }
 Copy-Item (Join-Path $win 'third_party\softcam\dist\bin\x64\softcam.dll')   (Join-Path $OutDir 'bin\softcam\x64')   -Force
 Copy-Item (Join-Path $win 'third_party\softcam\dist\bin\Win32\softcam.dll') (Join-Path $OutDir 'bin\softcam\Win32') -Force
 Copy-Item (Join-Path $PSScriptRoot 'files\phonecam.ps1') (Join-Path $OutDir 'bin') -Force

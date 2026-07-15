@@ -112,6 +112,8 @@ struct Capture {
     IAudioCaptureClient *cap = nullptr;
     WAVEFORMATEX *fmt = nullptr;
     Detector det;
+    double recordStartMs = 0;
+    std::vector<float> recorded;
     std::thread th;
 };
 
@@ -121,6 +123,7 @@ static bool initCapture(IMMDevice *dev, bool loopback, Capture &c) {
     DWORD flags = loopback ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0;
     if (FAILED(c.client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 10000000, 0, c.fmt, nullptr))) return false;
     if (FAILED(c.client->GetService(__uuidof(IAudioCaptureClient), (void **)&c.cap))) return false;
+    c.recorded.reserve((size_t)c.fmt->nSamplesPerSec * 40);
     return SUCCEEDED(c.client->Start());
 }
 
@@ -135,11 +138,65 @@ static void captureLoop(Capture *c) {
         if (FAILED(c->cap->GetBuffer(&data, &frames, &flags, &devPos, &qpcPos))) break;
         if (frames > 0) {
             double startMs = qpcPos / 10000.0;                       // qpcPos is in 100ns units
-            if (flags & AUDCLNT_BUFFERFLAGS_SILENT) { /* skip: no signal */ }
-            else { toMono(data, frames, c->fmt, mono); c->det.feed(mono, startMs, sr); }
+            if (flags & AUDCLNT_BUFFERFLAGS_SILENT) mono.assign(frames, 0.0f);
+            else toMono(data, frames, c->fmt, mono);
+            if (c->recorded.empty()) c->recordStartMs = startMs;
+            c->recorded.insert(c->recorded.end(), mono.begin(), mono.end());
+            if (!(flags & AUDCLNT_BUFFERFLAGS_SILENT)) c->det.feed(mono, startMs, sr);
         }
         c->cap->ReleaseBuffer(frames);
     }
+}
+
+static std::vector<float> makeProbe(double sr) {
+    int len = (int)(0.012 * sr);
+    std::vector<float> probe(len);
+    for (int i = 0; i < len; i++) {
+        double env = 1.0;
+        if (i > len - (int)(0.002 * sr)) env = (double)(len - i) / (0.002 * sr);
+        probe[i] = (float)(env * std::sin(2 * 3.14159265 * 1500.0 * i / sr));
+    }
+    return probe;
+}
+
+struct CorrelationMatch { double timeMs = 0; double score = 0; };
+
+static CorrelationMatch findProbe(const Capture &c, const std::vector<float> &probe,
+                                  double fromMs, double toMs) {
+    CorrelationMatch best;
+    if (c.recorded.empty() || probe.empty()) return best;
+    double sr = c.fmt->nSamplesPerSec;
+    ptrdiff_t first = (ptrdiff_t)((fromMs - c.recordStartMs) * sr / 1000.0);
+    ptrdiff_t last = (ptrdiff_t)((toMs - c.recordStartMs) * sr / 1000.0);
+    first = std::max<ptrdiff_t>(0, first);
+    last = std::min<ptrdiff_t>((ptrdiff_t)c.recorded.size() - (ptrdiff_t)probe.size(), last);
+    if (last <= first) return best;
+
+    double probeEnergy = 0;
+    for (float v : probe) probeEnergy += v * v;
+    ptrdiff_t bestPos = first;
+    auto scoreAt = [&](ptrdiff_t pos) {
+        double dot = 0, signalEnergy = 0;
+        for (size_t i = 0; i < probe.size(); i++) {
+            double s = c.recorded[(size_t)pos + i];
+            dot += s * probe[i];
+            signalEnergy += s * s;
+        }
+        return signalEnergy > 1e-12 ? std::fabs(dot) / std::sqrt(signalEnergy * probeEnergy) : 0.0;
+    };
+
+    for (ptrdiff_t pos = first; pos <= last; pos += 4) {
+        double score = scoreAt(pos);
+        if (score > best.score) { best.score = score; bestPos = pos; }
+    }
+    ptrdiff_t refineFirst = std::max(first, bestPos - 4);
+    ptrdiff_t refineLast = std::min(last, bestPos + 4);
+    for (ptrdiff_t pos = refineFirst; pos <= refineLast; pos++) {
+        double score = scoreAt(pos);
+        if (score > best.score) { best.score = score; bestPos = pos; }
+    }
+    best.timeMs = c.recordStartMs + 1000.0 * bestPos / sr;
+    return best;
 }
 
 int main(int argc, char **argv) {
@@ -196,6 +253,7 @@ int main(int argc, char **argv) {
     ret.th = std::thread(captureLoop, &ret);
 
     // Render thread: silence, punctuated by a click every intervalMs.
+    std::vector<double> clickTimes;
     std::thread render([&]() {
         rc->Start();
         int clickPos = clickLen;                 // start idle
@@ -207,7 +265,12 @@ int main(int argc, char **argv) {
             UINT32 pad = 0; if (FAILED(rc->GetCurrentPadding(&pad))) break;
             UINT32 avail = rbuf - pad;
             if (avail == 0) { Sleep(3); continue; }
-            if (clickPos >= clickLen && qpcMs() >= nextClick && played < nClicks) { clickPos = 0; nextClick += intervalMs; played++; }
+            if (clickPos >= clickLen && qpcMs() >= nextClick && played < nClicks) {
+                clickPos = 0;
+                clickTimes.push_back(qpcMs());
+                nextClick += intervalMs;
+                played++;
+            }
             BYTE *buf; if (FAILED(rr->GetBuffer(avail, &buf))) break;
             float *ff = reinterpret_cast<float *>(buf);
             int16_t *si = reinterpret_cast<int16_t *>(buf);
@@ -225,19 +288,50 @@ int main(int argc, char **argv) {
     g_run = false;
     render.join(); ref.th.join(); ret.th.join();
 
-    // Match: for each RET onset, the latest REF onset within [-100, 2000] ms before it.
-    std::vector<double> lat;
-    for (double r : ret.det.onsets) {
-        double best = -1;
-        for (double f : ref.det.onsets) { double d = r - f; if (d >= -100.0 && d <= 2000.0) { if (best < 0 || f > best) best = f; } }
-        if (best >= 0) lat.push_back(r - best);
+    // Correlate the exact probe waveform in a bounded window for each scheduled click. Unlike
+    // threshold crossings, this remains selective when speech, music, or notifications are
+    // present on either capture stream.
+    std::vector<float> refProbe = makeProbe(ref.fmt->nSamplesPerSec);
+    std::vector<float> retProbe = makeProbe(ret.fmt->nSamplesPerSec);
+    std::vector<double> lat, refScores, retScores;
+    for (double scheduled : clickTimes) {
+        CorrelationMatch f = findProbe(ref, refProbe, scheduled - 25.0, scheduled + 250.0);
+        if (f.score < 0.45) continue;
+        CorrelationMatch r = findProbe(ret, retProbe, f.timeMs, f.timeMs + 900.0);
+        if (r.score < 0.12) continue;
+        lat.push_back(r.timeMs - f.timeMs);
+        refScores.push_back(f.score);
+        retScores.push_back(r.score);
+    }
+
+    size_t correlated = lat.size();
+    if (lat.size() >= 5) {
+        std::vector<double> sorted = lat;
+        std::sort(sorted.begin(), sorted.end());
+        double center = sorted[sorted.size() / 2];
+        std::vector<double> deviations;
+        deviations.reserve(sorted.size());
+        for (double v : sorted) deviations.push_back(std::fabs(v - center));
+        std::sort(deviations.begin(), deviations.end());
+        double mad = deviations[deviations.size() / 2];
+        double limit = std::max(30.0, 6.0 * mad);
+        lat.erase(std::remove_if(lat.begin(), lat.end(), [&](double v) {
+            return std::fabs(v - center) > limit;
+        }), lat.end());
     }
 
     printf("\n=== latbench ===\n");
-    printf("REF onsets: %zu   RET onsets: %zu   matched: %zu\n", ref.det.onsets.size(), ret.det.onsets.size(), lat.size());
-    if (lat.empty()) {
+    printf("raw onsets: REF=%zu RET=%zu   scheduled clicks=%zu\n",
+           ref.det.onsets.size(), ret.det.onsets.size(), clickTimes.size());
+    double minRefScore = refScores.empty() ? 0 : *std::min_element(refScores.begin(), refScores.end());
+    double minRetScore = retScores.empty() ? 0 : *std::min_element(retScores.begin(), retScores.end());
+    printf("correlated: %zu   inliers: %zu   minimum scores: REF=%.3f RET=%.3f\n",
+           correlated, lat.size(), minRefScore, minRetScore);
+    size_t minValid = std::max<size_t>(3, clickTimes.size() / 2);
+    if (lat.size() < minValid) {
         printf("No matched clicks. In a real run: is the phone streaming into CABLE, mic near the speakers,\n"
-               "volume up? Try --thresh lower. (--selftest needs VB-CABLE looping.)\n");
+               "volume up? Need at least %zu correlated returns; got %zu.\n"
+               "(--selftest needs VB-CABLE looping.)\n", minValid, lat.size());
     } else {
         std::sort(lat.begin(), lat.end());
         double sum = 0; for (double v : lat) sum += v; double mean = sum / lat.size();
