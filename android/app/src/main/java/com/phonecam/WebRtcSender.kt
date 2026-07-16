@@ -4,7 +4,11 @@ import android.content.Context
 import android.util.Log
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
+import org.webrtc.Camera2Enumerator
 import org.webrtc.DataChannel
+import org.webrtc.DefaultVideoDecoderFactory
+import org.webrtc.DefaultVideoEncoderFactory
+import org.webrtc.EglBase
 import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
@@ -13,6 +17,10 @@ import org.webrtc.PeerConnectionFactory
 import org.webrtc.RtpReceiver
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
+import org.webrtc.SurfaceTextureHelper
+import org.webrtc.VideoCapturer
+import org.webrtc.VideoSource
+import org.webrtc.VideoTrack
 import org.webrtc.audio.JavaAudioDeviceModule
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -39,6 +47,7 @@ class WebRtcSender(
     private val host: String,
     private val port: Int,
     private val secret: String,
+    private val withVideo: Boolean,
     private val onState: (State) -> Unit,
 ) {
     enum class State { CONNECTING, CONNECTED, DISCONNECTED, FAILED }
@@ -48,6 +57,11 @@ class WebRtcSender(
     private var adm: JavaAudioDeviceModule? = null
     private var audioSource: AudioSource? = null
     private var audioTrack: AudioTrack? = null
+    private var eglBase: EglBase? = null
+    private var videoCapturer: VideoCapturer? = null
+    private var videoSource: VideoSource? = null
+    private var videoTrack: VideoTrack? = null
+    private var surfaceHelper: SurfaceTextureHelper? = null
     private var socket: Socket? = null
     private var worker: Thread? = null
 
@@ -78,8 +92,14 @@ class WebRtcSender(
             .setUseHardwareAcousticEchoCanceler(true)
             .setUseHardwareNoiseSuppressor(true)
             .createAudioDeviceModule()
+        // Hardware H.264 (via MediaCodec) so the PC's H264 offer has a matching encoder; the EGL
+        // context is shared with the camera capture path. VP8/VP9 stay enabled as fallback.
+        val egl = EglBase.create()
+        eglBase = egl
         factory = PeerConnectionFactory.builder()
             .setAudioDeviceModule(adm)
+            .setVideoEncoderFactory(DefaultVideoEncoderFactory(egl.eglBaseContext, true, true))
+            .setVideoDecoderFactory(DefaultVideoDecoderFactory(egl.eglBaseContext))
             .createPeerConnectionFactory()
 
         // No STUN/TURN: LAN-direct, host candidates only. The DTLS fingerprints in the SDP are the
@@ -100,6 +120,9 @@ class WebRtcSender(
         val track = factory!!.createAudioTrack("mic0", src).apply { setEnabled(true) }
         audioTrack = track
         peer.addTrack(track, listOf("pcam"))
+
+        // Camera → H.264 video track (added after audio to match the PC offer's m-line order).
+        if (withVideo) startCamera(peer, egl)
 
         // --- signaling handshake over TCP ---
         onState(State.CONNECTING)
@@ -147,12 +170,39 @@ class WebRtcSender(
         worker?.interrupt()
         // Tear down WebRTC off the caller's thread — dispose() blocks on WebRTC's threads.
         Thread {
+            runCatching { videoCapturer?.stopCapture() }
             runCatching { pc?.dispose() }
             runCatching { audioTrack?.dispose() }
             runCatching { audioSource?.dispose() }
+            runCatching { videoTrack?.dispose() }
+            runCatching { videoSource?.dispose() }
+            runCatching { videoCapturer?.dispose() }
+            runCatching { surfaceHelper?.dispose() }
             runCatching { adm?.release() }
+            runCatching { eglBase?.release() }
             pc = null; audioTrack = null; audioSource = null; adm = null; factory = null
+            videoTrack = null; videoSource = null; videoCapturer = null; surfaceHelper = null; eglBase = null
         }.apply { isDaemon = true }.start()
+    }
+
+    /** Start Camera2 capture → a sendonly H.264 video track (back camera preferred, for webcam use). */
+    private fun startCamera(peer: PeerConnection, egl: EglBase) {
+        val enumerator = Camera2Enumerator(appCtx)
+        val names = enumerator.deviceNames
+        val camName = names.firstOrNull { enumerator.isBackFacing(it) } ?: names.firstOrNull()
+        if (camName == null) { Log.w(TAG, "webrtc: no camera available — audio only"); return }
+        val capturer = enumerator.createCapturer(camName, null)
+        videoCapturer = capturer
+        val helper = SurfaceTextureHelper.create("CaptureThread", egl.eglBaseContext)
+        surfaceHelper = helper
+        val vsrc = factory!!.createVideoSource(false)   // isScreencast = false
+        videoSource = vsrc
+        capturer.initialize(helper, appCtx, vsrc.capturerObserver)
+        capturer.startCapture(1280, 720, 30)
+        val vtrack = factory!!.createVideoTrack("cam0", vsrc).apply { setEnabled(true) }
+        videoTrack = vtrack
+        peer.addTrack(vtrack, listOf("pcam"))
+        Log.i(TAG, "webrtc: camera track added ($camName, 720p30)")
     }
 
     /** Keep a saved-PC reconnect alive when the phone starts before the desktop listener. */

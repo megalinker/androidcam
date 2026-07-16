@@ -176,7 +176,7 @@ class StreamService : Service(), ConnectChecker {
         val sigSecret = intent?.getStringExtra(EXTRA_SIG_SECRET)
 
         // WebRTC is mic-only for now (Phase 3); force the mic foreground type regardless of the toggle.
-        startForegroundForMode(if (transport == "webrtc") Mode.MIC_ONLY else mode)
+        startForegroundForMode(mode)   // WebRTC now carries video too, so honor the real mode
         startStreaming(mode, quality, transport, sigHost, sigPort, sigSecret)
         return START_STICKY
     }
@@ -187,7 +187,7 @@ class StreamService : Service(), ConnectChecker {
         clientConnected = false; everConnected = false
 
         // WebRTC (mic-only) takes a wholly separate path — org.webrtc, not RootEncoder.
-        if (transport == "webrtc") { startWebrtcStreaming(sigHost, sigPort, sigSecret); return }
+        if (transport == "webrtc") { startWebrtcStreaming(mode, sigHost, sigPort, sigSecret); return }
 
         // The RTSP server won't answer a client until the video encoder emits its first keyframe
         // (SPS/PPS via onVideoInfo), and a NoVideoSource never produces one. Camera modes use the real
@@ -277,13 +277,13 @@ class StreamService : Service(), ConnectChecker {
      * No RootEncoder, no camera, no dummy-video hack — org.webrtc captures the mic directly.
      * The PC is the offerer/listener, so "connected" comes from the WebRTC state callback.
      */
-    private fun startWebrtcStreaming(sigHost: String?, sigPort: Int, sigSecret: String?) {
+    private fun startWebrtcStreaming(mode: Mode, sigHost: String?, sigPort: Int, sigSecret: String?) {
         if (sigHost.isNullOrEmpty() || sigPort !in 1..65535 || sigSecret.isNullOrEmpty()) {
             Log.e(TAG, "webrtc: missing signaling target (host=$sigHost port=$sigPort)")
             stopSelf(); return
         }
         try {
-            val sender = WebRtcSender(applicationContext, sigHost, sigPort, sigSecret) { state ->
+            val sender = WebRtcSender(applicationContext, sigHost, sigPort, sigSecret, mode != Mode.MIC_ONLY) { state ->
                 when (state) {
                     WebRtcSender.State.CONNECTED -> {
                         clientConnected = true; everConnected = true
