@@ -84,29 +84,6 @@ class MainActivity : AppCompatActivity() {
         findViewById<MaterialButton>(R.id.reconnectBtn).setOnClickListener { reconnectWebrtc() }
         urlText.setOnClickListener { copyUrl() }
         findViewById<MaterialButton>(R.id.switchCamBtn).setOnClickListener { switchCamera() }
-
-        handleDebugIntent(intent)
-    }
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        handleDebugIntent(intent)
-    }
-
-    /**
-     * Automation/QA hook: connect without a physical QR scan.
-     *   adb shell am start -n com.phonecam/.MainActivity \
-     *     --es pcam3 "PCAM3:<pc-ip>:<port>:<secret>" --es dmode BOTH
-     * `dmode` (BOTH / CAMERA_ONLY / MIC_ONLY) presets the mode toggle first.
-     */
-    private fun handleDebugIntent(intent: Intent?) {
-        val payload = intent?.getStringExtra("pcam3") ?: return
-        when (intent.getStringExtra("dmode")) {
-            "CAMERA_ONLY" -> modeGroup.check(R.id.modeCamera)
-            "MIC_ONLY" -> modeGroup.check(R.id.modeMic)
-            "BOTH" -> modeGroup.check(R.id.modeBoth)
-        }
-        ui.post { onScanned(payload) }
     }
 
     // --- Wi-Fi pairing (scan the PC's QR) ---
