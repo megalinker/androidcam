@@ -208,12 +208,18 @@ class UsbStreamer(
                     override fun onConfigured(session: CameraCaptureSession) {
                         if (closed.get()) return
                         captureSession = session
+                        // Try a fixed-fps request; if the device rejects that AE range, retry without it
+                        // (a rejected request = a repeating capture that never starts = zero frames).
                         val req = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                             addTarget(surface)
                             set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, android.util.Range(videoFps, videoFps))
                         }
-                        runCatching { session.setRepeatingRequest(req.build(), null, h) }
-                            .onFailure { Log.e(TAG, "usb: setRepeatingRequest failed", it) }
+                        val ok = runCatching { session.setRepeatingRequest(req.build(), null, h) }.isSuccess
+                        if (!ok) {
+                            val plain = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply { addTarget(surface) }
+                            runCatching { session.setRepeatingRequest(plain.build(), null, h) }
+                                .onFailure { Log.e(TAG, "usb: setRepeatingRequest failed", it) }
+                        }
                         Log.i(TAG, "usb: camera streaming ${videoW}x${videoH}@${videoFps}")
                     }
                     override fun onConfigureFailed(session: CameraCaptureSession) {
