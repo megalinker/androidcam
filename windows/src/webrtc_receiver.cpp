@@ -1,4 +1,4 @@
-// WebRTC receive session for receiver.exe (--webrtc). See webrtc_receiver.h + docs/webrtc-migration.md.
+// WebRTC receive session for receiver.exe (--webrtc). See webrtc_receiver.h.
 //
 // Combines the three Phase-1/2a de-risked pieces into the real receiver:
 //   PCAM3 TCP signaling server (offerer, pairSecret-gated)   [proven: webrtc_signaling.cpp]

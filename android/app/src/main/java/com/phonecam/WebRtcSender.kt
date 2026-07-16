@@ -32,7 +32,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Mic-only WebRTC sender — Phase 3 of docs/webrtc-migration.md.
+ * WebRTC sender — Opus mic + optional H.264 camera.
  *
  * Connects to the PC's PCAM3 TCP signaling channel, answers the PC's recvonly Opus offer with a
  * sendonly microphone track, and streams over DTLS-SRTP (LAN-direct, host ICE candidates only).

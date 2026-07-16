@@ -1,4 +1,4 @@
-// Phase 1b (docs/webrtc-migration.md): the PCAM3 signaling wire. The QR carries
+// Phase 1b: the PCAM3 signaling wire. The QR carries
 // PCAM3:<pcIP>:<sigPort>:<pairSecret>; the phone connects over TCP and the two exchange
 // SDP offer/answer (PC offers recvonly, phone answers sendonly), pairSecret-gated. Then
 // WebRTC media (DTLS-SRTP/UDP) flows LAN-direct. This test runs BOTH roles in one process

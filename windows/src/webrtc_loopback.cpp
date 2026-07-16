@@ -1,4 +1,4 @@
-// Phase 1 de-risk (docs/webrtc-migration.md): two libdatachannel PeerConnections in one
+// Phase 1 de-risk: two libdatachannel PeerConnections in one
 // process exchange SDP + ICE candidates (this in-process wiring becomes the PCAM3 TCP
 // signaling channel), establish a DTLS-SRTP connection, and send/receive Opus RTP.
 //

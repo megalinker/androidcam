@@ -620,7 +620,7 @@ public class PhoneCamGui : Form
         timer.Start();
     }
 
-    /// <summary>WebRTC mode (mic-only, Phase 3 of docs/webrtc-migration.md): run receiver.exe as a PCAM3
+    /// <summary>WebRTC mode: run receiver.exe as a PCAM3
     /// signaling *offerer* and show a QR the phone answers. The phone captures mic → Opus → DTLS-SRTP
     /// straight into the CABLE virtual mic — lower latency + authenticated encryption, no video.</summary>
     void StartWebrtcPairing()

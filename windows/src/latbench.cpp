@@ -1,4 +1,4 @@
-// latbench — end-to-end mouth-to-virtual-mic latency benchmark (docs/webrtc-migration.md).
+// latbench — end-to-end mouth-to-virtual-mic latency benchmark.
 //
 // Plays a click train out a render endpoint and captures TWO WASAPI streams on the shared
 // QPC clock the audio engine stamps each packet with:
@@ -148,13 +148,20 @@ static void captureLoop(Capture *c) {
     }
 }
 
-static std::vector<float> makeProbe(double sr) {
-    int len = (int)(0.012 * sr);
+// Each click gets a distinct frequency so returns never alias, even when several are in flight at
+// once (latency >> interval). Spread across the voice band so all survive the mic + AAC/Opus.
+static double freqFor(int k) { return 900.0 + 130.0 * (k % 24); }
+
+static const double CLICK_SEC = 0.040;   // 40 ms tone burst — enough energy to survive the phone mic AGC/NS
+
+static std::vector<float> makeProbe(double sr, double freq) {
+    int len = (int)(CLICK_SEC * sr);
     std::vector<float> probe(len);
     for (int i = 0; i < len; i++) {
         double env = 1.0;
-        if (i > len - (int)(0.002 * sr)) env = (double)(len - i) / (0.002 * sr);
-        probe[i] = (float)(env * std::sin(2 * 3.14159265 * 1500.0 * i / sr));
+        if (i < (int)(0.003 * sr)) env = i / (0.003 * sr);                     // 3ms attack
+        if (i > len - (int)(0.005 * sr)) env = (double)(len - i) / (0.005 * sr); // 5ms release
+        probe[i] = (float)(env * std::sin(2 * 3.14159265 * freq * i / sr));
     }
     return probe;
 }
@@ -239,15 +246,17 @@ int main(int argc, char **argv) {
     if (!initCapture(rdev, true, ref)) { printf("REF loopback init failed\n"); return 1; }
     if (!initCapture(cdev, false, ret)) { printf("RET capture init failed\n"); return 1; }
 
-    // Pre-render a click: 12 ms of 1.5 kHz at 0.6, sharp attack (a crisp transient that survives Opus).
+    // One 12 ms click waveform per scheduled click, each at its own frequency (0.6, 2 ms release).
     double rsr = rfmt->nSamplesPerSec; int rch = rfmt->nChannels;
-    int clickLen = (int)(0.012 * rsr);
-    std::vector<float> click(clickLen);
-    for (int i = 0; i < clickLen; i++) {
-        double env = i < clickLen - 1 ? 1.0 : 0.0;
-        if (i > clickLen - (int)(0.002 * rsr)) env = (double)(clickLen - i) / (0.002 * rsr);  // 2ms release
-        click[i] = (float)(0.6 * env * std::sin(2 * 3.14159265 * 1500.0 * i / rsr));
-    }
+    int clickLen = (int)(CLICK_SEC * rsr);
+    std::vector<std::vector<float>> clicks(nClicks, std::vector<float>(clickLen));
+    for (int k = 0; k < nClicks; k++)
+        for (int i = 0; i < clickLen; i++) {
+            double env = 1.0;
+            if (i < (int)(0.003 * rsr)) env = i / (0.003 * rsr);
+            if (i > clickLen - (int)(0.005 * rsr)) env = (double)(clickLen - i) / (0.005 * rsr);
+            clicks[k][i] = (float)(0.6 * env * std::sin(2 * 3.14159265 * freqFor(k) * i / rsr));
+        }
 
     ref.th = std::thread(captureLoop, &ref);
     ret.th = std::thread(captureLoop, &ret);
@@ -257,6 +266,7 @@ int main(int argc, char **argv) {
     std::thread render([&]() {
         rc->Start();
         int clickPos = clickLen;                 // start idle
+        int curClick = 0;                        // which click waveform is currently playing
         double nextClick = qpcMs() + 500;        // 0.5s warm-up
         int played = 0;
         bool isFloat = (rfmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) ||
@@ -266,6 +276,7 @@ int main(int argc, char **argv) {
             UINT32 avail = rbuf - pad;
             if (avail == 0) { Sleep(3); continue; }
             if (clickPos >= clickLen && qpcMs() >= nextClick && played < nClicks) {
+                curClick = played;
                 clickPos = 0;
                 clickTimes.push_back(qpcMs());
                 nextClick += intervalMs;
@@ -275,7 +286,7 @@ int main(int argc, char **argv) {
             float *ff = reinterpret_cast<float *>(buf);
             int16_t *si = reinterpret_cast<int16_t *>(buf);
             for (UINT32 i = 0; i < avail; i++) {
-                float s = (clickPos < clickLen) ? click[clickPos++] : 0.0f;
+                float s = (clickPos < clickLen) ? clicks[curClick][clickPos++] : 0.0f;
                 for (int c = 0; c < rch; c++) { if (isFloat) ff[i * rch + c] = s; else si[i * rch + c] = (int16_t)(s * 32767); }
             }
             rr->ReleaseBuffer(avail, 0);
@@ -291,14 +302,16 @@ int main(int argc, char **argv) {
     // Correlate the exact probe waveform in a bounded window for each scheduled click. Unlike
     // threshold crossings, this remains selective when speech, music, or notifications are
     // present on either capture stream.
-    std::vector<float> refProbe = makeProbe(ref.fmt->nSamplesPerSec);
-    std::vector<float> retProbe = makeProbe(ret.fmt->nSamplesPerSec);
+    // Each click carries a unique frequency, so its return is found by correlating that click's own
+    // probe over a wide (8 s) window — unambiguous even with several clicks in flight (latency >> interval).
     std::vector<double> lat, refScores, retScores;
-    for (double scheduled : clickTimes) {
-        CorrelationMatch f = findProbe(ref, refProbe, scheduled - 25.0, scheduled + 250.0);
+    for (size_t k = 0; k < clickTimes.size(); k++) {
+        std::vector<float> refProbe = makeProbe(ref.fmt->nSamplesPerSec, freqFor((int)k));
+        std::vector<float> retProbe = makeProbe(ret.fmt->nSamplesPerSec, freqFor((int)k));
+        CorrelationMatch f = findProbe(ref, refProbe, clickTimes[k] - 25.0, clickTimes[k] + 250.0);
         if (f.score < 0.45) continue;
-        CorrelationMatch r = findProbe(ret, retProbe, f.timeMs, f.timeMs + 900.0);
-        if (r.score < 0.12) continue;
+        CorrelationMatch r = findProbe(ret, retProbe, f.timeMs, f.timeMs + 8000.0);
+        if (r.score < 0.10) continue;
         lat.push_back(r.timeMs - f.timeMs);
         refScores.push_back(f.score);
         retScores.push_back(r.score);

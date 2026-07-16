@@ -1,4 +1,4 @@
-// Phase 5a de-risk (docs/webrtc-migration.md): the VIDEO codec bridge between libdatachannel's H.264
+// Phase 5a de-risk: the VIDEO codec bridge between libdatachannel's H.264
 // RTP and FFmpeg's H.264 decoder — the new thing Phase 5 adds. A sender encodes a moving test pattern
 // with libx264 (zerolatency, no B-frames) -> H264RtpPacketizer -> DTLS-SRTP -> H264RtpDepacketizer ->
 // onFrame -> FFmpeg h264 decode, and we verify the frames decode at the right size and actually move.

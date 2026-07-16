@@ -1,6 +1,6 @@
 // WebRTC receive session for receiver.exe (--webrtc). Runs a PCAM3 TCP signaling server
 // (offerer role), accepts an Opus audio track over DTLS-SRTP, decodes it with FFmpeg, and
-// feeds AVFrames to the existing WasapiSink (CABLE / virtual mic). See docs/webrtc-migration.md.
+// feeds AVFrames to the existing WasapiSink (CABLE / virtual mic).
 #pragma once
 
 #include <atomic>

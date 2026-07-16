@@ -34,3 +34,7 @@ windows/driver/src/**/*.user
 *.jks
 *.pfx
 *.cer
+
+# CMake build trees (never commit build artifacts)
+windows/build-webrtc/
+windows/build/

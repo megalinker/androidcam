@@ -56,8 +56,7 @@ class StreamService : Service(), ConnectChecker {
         const val EXTRA_MODE = "mode"
         const val EXTRA_QUALITY = "quality"
         // Transport: "rtsp" (default, phone = server) or "webrtc" (phone answers the PC's PCAM3
-        // offer with a sendonly Opus mic track — mic-only,
-        // Phase 3 of docs/webrtc-migration.md).
+        // offer with sendonly Opus mic + optional H.264 camera tracks).
         const val EXTRA_TRANSPORT = "transport"
         // WebRTC signaling target (PCAM3 QR).
         const val EXTRA_SIG_HOST = "sigHost"

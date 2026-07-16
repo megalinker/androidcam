@@ -1,4 +1,4 @@
-// Phase 2 core de-risk (docs/webrtc-migration.md): the codec bridge between libdatachannel's
+// Phase 2 core de-risk: the codec bridge between libdatachannel's
 // RTP and FFmpeg's Opus decoder — the new thing WebRTC adds to our receiver. A sender encodes
 // a 440 Hz tone to real Opus and sends it as RTP over a DTLS-SRTP track; the receiver strips the
 // RTP header (handling CSRC + extensions, as real WebRTC senders add them), feeds the Opus to
