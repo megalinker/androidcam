@@ -22,6 +22,7 @@
 #include <csignal>
 
 #include "webrtc_receiver.h"   // PCAM3 signaling + DTLS-SRTP Opus/H264 -> WASAPI + softcam
+#include "usb_receiver.h"      // scrcpy-style H.264/PCM over an adb-forwarded socket -> WASAPI + softcam
 
 static std::atomic<bool> g_running{true};
 static void on_sigint(int) { g_running = false; }
@@ -35,6 +36,8 @@ struct Options {
     float       micGainDb = 0.0f;     // --mic-gain: boost the (quiet) phone mic; soft-limited in the sink
     std::string eqPreset;             // --eq: voice EQ preset or a "type:freq:q:gain;..." band list
     std::string iceBind;              // --ice-bind: bind ICE to this local IPv4 (USB-tethering adapter)
+    bool        usb = false;          // --usb: receive over an adb-forwarded socket instead of WebRTC
+    int         usbPort = 0;          // --usb-port: local (adb-forwarded) TCP port to connect to
 };
 
 static Options parse_args(int argc, char **argv) {
@@ -50,6 +53,8 @@ static Options parse_args(int argc, char **argv) {
         else if (a == "--mic-gain" && i + 1 < argc) o.micGainDb = (float)atof(argv[++i]);
         else if (a == "--eq" && i + 1 < argc) o.eqPreset = argv[++i];
         else if (a == "--ice-bind" && i + 1 < argc) o.iceBind = argv[++i];
+        else if (a == "--usb") o.usb = true;
+        else if (a == "--usb-port" && i + 1 < argc) o.usbPort = atoi(argv[++i]);
         else if (a.rfind("--", 0) == 0) fprintf(stderr, "ignoring unknown option: %s\n", a.c_str());
     }
     return o;
@@ -57,14 +62,35 @@ static Options parse_args(int argc, char **argv) {
 
 int main(int argc, char **argv) {
     Options opt = parse_args(argc, argv);
+    signal(SIGINT, on_sigint);
+
+    // --usb: the scrcpy-style path over an adb-forwarded socket (no WebRTC).
+    if (opt.usb) {
+        if (opt.usbPort <= 0) {
+            fprintf(stderr, "usage: %s --usb --usb-port <local-port> [--preview] "
+                    "[--audio-device <name-substr>] [--mic-gain <db>] [--eq <...>]\n", argv[0]);
+            return 1;
+        }
+        fprintf(stderr, "[phonecam] transport=usb (H264 + PCM over adb :%d)  audio=%s\n",
+                opt.usbPort, opt.audioDevice.empty() ? "default-output" : opt.audioDevice.c_str());
+        UsbRecvConfig ucfg;
+        ucfg.usbPort     = opt.usbPort;
+        ucfg.audioDevice = opt.audioDevice;
+        ucfg.micGainDb   = opt.micGainDb;
+        ucfg.eqPreset    = opt.eqPreset;
+        ucfg.wantPreview = opt.preview;
+        return run_usb_session(ucfg, &g_running);
+    }
+
     if (opt.sigPort <= 0 || opt.sigSecret.empty()) {
         fprintf(stderr,
             "usage: %s --sig-port <port> --sig-secret <secret> [--webrtc-video] [--preview] "
             "[--audio-device <name-substr>] [--mic-gain <db>] [--eq <preset|type:f:q:db;...>] "
-            "[--ice-bind <local-ipv4>]\n", argv[0]);
+            "[--ice-bind <local-ipv4>]\n"
+            "   or: %s --usb --usb-port <local-port> [--preview] [--audio-device <name-substr>] ...\n",
+            argv[0], argv[0]);
         return 1;
     }
-    signal(SIGINT, on_sigint);
     fprintf(stderr, "[phonecam] transport=webrtc (DTLS-SRTP + Opus%s)  audio=%s\n",
             opt.webrtcVideo ? " + H264" : "",
             opt.audioDevice.empty() ? "default-output" : opt.audioDevice.c_str());

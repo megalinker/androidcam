@@ -47,6 +47,8 @@ class MainActivity : AppCompatActivity() {
 
     // The PC target from the last scanned QR, held across the permission prompt.
     private var pendingWebrtc: WebrtcTarget? = null
+    // A USB request pushed by the PC over adb (port, mode, quality), held across the permission prompt.
+    private var pendingUsb: Triple<Int, String?, String?>? = null
     private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
         result.contents?.let { onScanned(it) }
     }
@@ -82,6 +84,54 @@ class MainActivity : AppCompatActivity() {
         reconnectBtn.setOnClickListener { reconnectWebrtc() }
         urlText.setOnClickListener { copyUrl() }
         findViewById<MaterialButton>(R.id.switchCamBtn).setOnClickListener { switchCamera() }
+
+        handleUsbIntent(intent)   // the PC may have launched us over adb to start USB streaming
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleUsbIntent(intent)
+    }
+
+    /**
+     * USB auto-connect: the PC (via bundled adb) launches us with ACTION_USB + the loopback port so we
+     * start streaming over the cable with no QR scan. adb has usually pre-granted camera/mic; if not,
+     * we prompt and resume from onRequestPermissionsResult.
+     */
+    private fun handleUsbIntent(intent: Intent?) {
+        if (intent?.action != ACTION_USB) return
+        pendingUsb = Triple(
+            intent.getIntExtra(StreamService.EXTRA_USB_PORT, StreamService.DEFAULT_USB_PORT),
+            intent.getStringExtra(KEY_MODE),
+            intent.getStringExtra(KEY_QUALITY))
+        if (ensurePermissions()) beginUsb()
+    }
+
+    private fun beginUsb() {
+        val req = pendingUsb ?: return
+        pendingUsb = null
+        val (port, modeName, qualityName) = req
+        // Honor a mode/quality the PC asked for (else keep the current selection).
+        modeName?.let { runCatching { StreamService.Mode.valueOf(it) }.getOrNull() }?.let { m ->
+            modeGroup.check(when (m) {
+                StreamService.Mode.CAMERA_ONLY -> R.id.modeCamera
+                StreamService.Mode.MIC_ONLY -> R.id.modeMic
+                else -> R.id.modeBoth
+            })
+        }
+        qualityName?.let { runCatching { StreamService.Quality.valueOf(it) }.getOrNull() }
+            ?.let { qualityInput.setText(it.label, false) }
+        prefs.edit().putString(KEY_MODE, selectedMode().name).putString(KEY_QUALITY, selectedQuality().name).apply()
+        val svc = Intent(this, StreamService::class.java).apply {
+            action = StreamService.ACTION_START
+            putExtra(StreamService.EXTRA_TRANSPORT, "usb")
+            putExtra(StreamService.EXTRA_USB_PORT, port)
+            putExtra(StreamService.EXTRA_MODE, selectedMode().name)
+            putExtra(StreamService.EXTRA_QUALITY, selectedQuality().name)
+        }
+        ContextCompat.startForegroundService(this, svc)
+        Toast.makeText(this, "USB — streaming to the PC…", Toast.LENGTH_SHORT).show()
     }
 
     // --- pairing (scan the PC's QR) ---
@@ -267,9 +317,12 @@ class MainActivity : AppCompatActivity() {
         val camOk = isGranted(permissions, grantResults, Manifest.permission.CAMERA)
         val micOk = isGranted(permissions, grantResults, Manifest.permission.RECORD_AUDIO)
         if (camOk && micOk) {
-            if (pendingWebrtc != null) beginWebrtc()
+            when {
+                pendingWebrtc != null -> beginWebrtc()
+                pendingUsb != null -> beginUsb()
+            }
         } else {
-            pendingWebrtc = null
+            pendingWebrtc = null; pendingUsb = null
             Toast.makeText(this, "Camera and microphone permissions are required.", Toast.LENGTH_LONG).show()
         }
     }
@@ -280,6 +333,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
+        // The PC launches us with this action over adb to start USB streaming (no QR scan).
+        const val ACTION_USB = "com.phonecam.action.USB"
         private const val REQ_PERMS = 1
         private const val KEY_MODE = "mode"
         private const val KEY_QUALITY = "quality"
