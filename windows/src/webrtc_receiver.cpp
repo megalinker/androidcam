@@ -159,6 +159,13 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
     std::thread at(audioThread, &fq, sinkFmt, cfg);
 
     rtc::Configuration config;
+    // Force ICE (and therefore media) onto one local interface when asked — e.g. the PC's
+    // USB-tethering adapter (192.168.42.x). juice then gathers only that host candidate, so the
+    // only workable pair is phone-rndis0 <-> PC-rndis: media rides the USB cable, not Wi-Fi.
+    if (!cfg.iceBind.empty()) {
+        config.bindAddress = cfg.iceBind;
+        fprintf(stderr, "[webrtc] binding ICE to %s (USB-tethering path)\n", cfg.iceBind.c_str());
+    }
     auto pc = std::make_shared<rtc::PeerConnection>(config);
     std::atomic<bool> disconnected{false};
     std::atomic<int>  rtpCount{0};

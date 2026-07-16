@@ -89,10 +89,11 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, settingsPath, logPath;
-    const string Version = "0.5.1";
+    const string Version = "0.5.2";
     const int WebrtcSigPort = 8891;   // TCP port the PC's WebRTC PCAM3 signaling listener binds
     bool webrtcMode = false;     // this session is a WebRTC (PCAM3) signaling + DTLS-SRTP receive (mic-only)
     string webrtcSecret = "";    // the pairSecret for this WebRTC session (kept out of logs)
+    string iceBindIp = "";       // set to the USB-tethering adapter IP when detected (forces media over USB)
     string pairSecret = "";      // persisted secret, so a phone that saved us can reconnect later
     DateTime pairWaitSince = DateTime.MinValue;   // when the WebRTC QR went up (to time the VPN hint)
     bool running = false;
@@ -487,20 +488,26 @@ public class PhoneCamGui : Form
     /// straight into the CABLE virtual mic — lower latency + authenticated encryption, no video.</summary>
     void StartWebrtcPairing()
     {
-        string ip = LocalIPv4();
-        if (ip == null) { MessageBox.Show("Couldn't determine this PC's Wi-Fi address. Use USB, or pick a different transport.", "PhoneCam"); return; }
+        // Prefer a USB-tethering link when the phone is sharing USB (the PC gets a 192.168.42.x
+        // address): media then rides the cable — no Wi-Fi jitter/congestion. Falls back to Wi-Fi.
+        string usb = UsbTetherIPv4();
+        string ip = usb ?? LocalIPv4();
+        if (ip == null) { MessageBox.Show("Couldn't determine this PC's address. Connect to the same Wi-Fi as the phone (or enable USB tethering on the phone), then try again.", "PhoneCam"); return; }
+        iceBindIp = usb ?? "";   // when tethering, bind ICE to the USB adapter so media can't slip onto Wi-Fi
         webrtcMode = true;
         // Reuse the stable persisted secret so a phone that saved us can reconnect without re-scanning.
         if (pairSecret.Length < 10) { pairSecret = Guid.NewGuid().ToString("N").Substring(0, 24); SaveSettings(); }
         webrtcSecret = pairSecret;
         string payload = "PCAM3:" + ip + ":" + WebrtcSigPort + ":" + webrtcSecret;
-        Log("WebRTC: signaling (offerer) on tcp/" + WebrtcSigPort + " — waiting for the phone to scan");
+        Log("WebRTC: signaling (offerer) on tcp/" + WebrtcSigPort + (usb != null ? " over USB tethering (" + ip + ")" : "") + " — waiting for the phone to scan");
         try { qrBox.Image = MakeQr(payload); }
         catch (Exception ex) { MessageBox.Show("Couldn't render the QR: " + ex.Message, "PhoneCam"); webrtcMode = false; return; }
-        qrLabel.Text = "Scan this with the PhoneCam app\n(⚡ low-latency mic)";
+        qrLabel.Text = usb != null
+            ? "Scan this with the PhoneCam app\n(🔌 USB — lowest latency)"
+            : "Scan this with the PhoneCam app\n(⚡ low-latency mic)";
         qrLabel.Visible = true; qrBox.Visible = true;
         pairWaitSince = DateTime.Now; vpnHint.Visible = false;
-        SetStatus(Amber, "Scan the QR (low-latency mic) with the PhoneCam app…");
+        SetStatus(Amber, usb != null ? "USB tethering detected — scan the QR with the PhoneCam app…" : "Scan the QR (low-latency mic) with the PhoneCam app…");
         StartWebrtcReceiver();
     }
 
@@ -516,6 +523,7 @@ public class PhoneCamGui : Form
             "--sig-port", WebrtcSigPort.ToString(), "--sig-secret", webrtcSecret,
             "--audio-device", "CABLE Input"
         };
+        if (iceBindIp.Length > 0) { a.Add("--ice-bind"); a.Add(iceBindIp); }   // force ICE onto USB tethering
         int bi = cbBoost.SelectedIndex; if (bi < 0 || bi >= BoostDb.Length) bi = 2;
         if (BoostDb[bi] != 0) { a.Add("--mic-gain"); a.Add(BoostDb[bi].ToString()); }
         string eq = SelectedEq();
@@ -572,6 +580,29 @@ public class PhoneCamGui : Form
         try { using (var s = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
             { s.Connect("8.8.8.8", 65530); return ((IPEndPoint)s.LocalEndPoint).Address.ToString(); } }
         catch { return null; }
+    }
+
+    /// <summary>
+    /// This PC's address on the phone's USB-tethering link, or null if the phone isn't tethering.
+    /// Android hands the PC a 192.168.42.x address (phone gateway = .129) over RNDIS/NCM, so that
+    /// subnet is a reliable, adapter-name-independent marker of the USB path.
+    /// </summary>
+    static string UsbTetherIPv4()
+    {
+        try
+        {
+            foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+                foreach (var ua in ni.GetIPProperties().UnicastAddresses)
+                    if (ua.Address.AddressFamily == AddressFamily.InterNetwork &&
+                        ua.Address.ToString().StartsWith("192.168.42."))
+                        return ua.Address.ToString();
+            }
+        }
+        catch { }
+        return null;
     }
 
     static bool IsPrivateLan(string ip)

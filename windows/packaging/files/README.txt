@@ -26,6 +26,13 @@ RECONNECTING
   first: the phone retries the saved PC endpoint while it waits for the Windows
   app to begin listening.
 
+USB (lowest latency, optional)
+  For the steadiest, lowest-latency link, enable USB tethering on the phone
+  (Settings > Network & internet > Hotspot & tethering > USB tethering) with the
+  cable plugged in. PhoneCam on the PC detects it automatically and routes media
+  over the cable instead of Wi-Fi - just scan the QR as usual. Unplug or turn
+  tethering off to go back to Wi-Fi.
+
 TROUBLESHOOTING
   - A full-tunnel VPN can hide LAN devices. Disable it or enable Allow LAN traffic
     on both the phone and PC.

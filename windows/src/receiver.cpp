@@ -11,6 +11,7 @@
 // Usage:
 //   receiver.exe --sig-port <port> --sig-secret <secret> [--webrtc-video] [--preview]
 //                [--audio-device <name-substr>] [--mic-gain <db>] [--eq <preset|type:f:q:db;...>]
+//                [--ice-bind <local-ipv4>]   (bind ICE to the USB-tethering adapter)
 //
 // Build/run: see windows/README.md and docs/build-and-run.md.
 
@@ -33,6 +34,7 @@ struct Options {
     std::string audioDevice;          // --audio-device: WASAPI render endpoint substring (e.g. "CABLE Input")
     float       micGainDb = 0.0f;     // --mic-gain: boost the (quiet) phone mic; soft-limited in the sink
     std::string eqPreset;             // --eq: voice EQ preset or a "type:freq:q:gain;..." band list
+    std::string iceBind;              // --ice-bind: bind ICE to this local IPv4 (USB-tethering adapter)
 };
 
 static Options parse_args(int argc, char **argv) {
@@ -47,6 +49,7 @@ static Options parse_args(int argc, char **argv) {
         else if (a == "--audio-device" && i + 1 < argc) o.audioDevice = argv[++i];
         else if (a == "--mic-gain" && i + 1 < argc) o.micGainDb = (float)atof(argv[++i]);
         else if (a == "--eq" && i + 1 < argc) o.eqPreset = argv[++i];
+        else if (a == "--ice-bind" && i + 1 < argc) o.iceBind = argv[++i];
         else if (a.rfind("--", 0) == 0) fprintf(stderr, "ignoring unknown option: %s\n", a.c_str());
     }
     return o;
@@ -57,7 +60,8 @@ int main(int argc, char **argv) {
     if (opt.sigPort <= 0 || opt.sigSecret.empty()) {
         fprintf(stderr,
             "usage: %s --sig-port <port> --sig-secret <secret> [--webrtc-video] [--preview] "
-            "[--audio-device <name-substr>] [--mic-gain <db>] [--eq <preset|type:f:q:db;...>]\n", argv[0]);
+            "[--audio-device <name-substr>] [--mic-gain <db>] [--eq <preset|type:f:q:db;...>] "
+            "[--ice-bind <local-ipv4>]\n", argv[0]);
         return 1;
     }
     signal(SIGINT, on_sigint);
@@ -73,5 +77,6 @@ int main(int argc, char **argv) {
     cfg.eqPreset    = opt.eqPreset;
     cfg.wantVideo   = opt.webrtcVideo;
     cfg.wantPreview = opt.preview;
+    cfg.iceBind     = opt.iceBind;
     return run_webrtc_session(cfg, &g_running);
 }

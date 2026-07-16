@@ -101,7 +101,21 @@ class WebRtcSender(
         // context is shared with the camera capture path. VP8/VP9 stay enabled as fallback.
         val egl = EglBase.create()
         eglBase = egl
+        // Enumerate ALL local interfaces via the native path (getifaddrs), NOT Android's
+        // ConnectivityManager network monitor. The monitor only reports networks the phone itself
+        // uses for egress and omits the USB-tethering *downstream* interface (rndis0/ncm0 at
+        // 192.168.42.129) — so with it on, the phone never gathers a USB-tethering ICE candidate and
+        // WebRTC-over-USB can't form a pair. Disabling it trades mid-session network-change handling
+        // (irrelevant for short LAN sessions) for seeing the USB interface. Ignore cellular/VPN so
+        // media can only ever take a LAN or USB path, never metered mobile data.
+        val opts = PeerConnectionFactory.Options().apply {
+            disableNetworkMonitor = true
+            networkIgnoreMask = PeerConnectionFactory.Options.ADAPTER_TYPE_CELLULAR or
+                PeerConnectionFactory.Options.ADAPTER_TYPE_VPN or
+                PeerConnectionFactory.Options.ADAPTER_TYPE_LOOPBACK
+        }
         factory = PeerConnectionFactory.builder()
+            .setOptions(opts)
             .setAudioDeviceModule(adm)
             .setVideoEncoderFactory(DefaultVideoEncoderFactory(egl.eglBaseContext, true, true))
             .setVideoDecoderFactory(DefaultVideoDecoderFactory(egl.eglBaseContext))
@@ -268,7 +282,9 @@ class WebRtcSender(
         override fun onIceGatheringChange(state: PeerConnection.IceGatheringState?) {
             if (state == PeerConnection.IceGatheringState.COMPLETE) gatheringComplete.countDown()
         }
-        override fun onIceCandidate(c: IceCandidate?) {}                  // non-trickle: inline in the SDP
+        override fun onIceCandidate(c: IceCandidate?) {                   // non-trickle (inline in the SDP); logged to see which interfaces we gather (Wi-Fi vs USB rndis0)
+            c?.let { Log.i(TAG, "ice cand: ${it.sdp}") }
+        }
         override fun onIceCandidatesRemoved(c: Array<out IceCandidate>?) {}
         override fun onAddStream(s: MediaStream?) {}
         override fun onRemoveStream(s: MediaStream?) {}

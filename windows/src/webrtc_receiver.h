@@ -14,6 +14,8 @@ struct WebrtcRecvConfig {
     std::string eqPreset;          // voice EQ preset / band list
     bool        wantVideo = false;   // also offer a recvonly H.264 video track -> softcam (Phase 5)
     bool        wantPreview = false;  // show/embed a GDI preview window of the decoded video
+    std::string iceBind;             // if set, bind ICE to this local IPv4 (e.g. the USB-tethering
+                                     // adapter) so media is forced over that interface, not Wi-Fi
 };
 
 // Runs until *running becomes false (Ctrl+C in receiver.exe). Re-listens between phone sessions.
