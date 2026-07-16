@@ -85,14 +85,14 @@ public class PhoneCamGui : Form
     NotifyIcon tray;
     bool minimizeToTray = false;
     bool startMinimized = false;    // launched with -tray (autostart) → start hidden in the tray
-    bool autoListen = false;        // on launch, auto-start the WebRTC listener for one-tap phone reconnect
+    bool autoListen = true;         // on launch, auto-start the WebRTC listener so the phone reconnects with one tap (no PC clicks)
     System.Windows.Forms.Timer timer;
     Process recv;
     IntPtr embedded = IntPtr.Zero;
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, adbExe, settingsPath, logPath, pairedHost;
-    const string Version = "0.5.0";
+    const string Version = "0.5.1";
     const string RtspUser = "phonecam";   // Basic-auth username the phone expects
     const int LocalPort = 18554, PhonePort = 8554;
     const int PhoneControlPort = 8555, LocalControlPort = 18555;   // "stop the phone now" channel (USB uses the forward)
@@ -1003,7 +1003,16 @@ public class PhoneCamGui : Form
         bool useMic = cbMic.Checked;
         if (!PrepareMic(ref useMic)) return;
         manualStop = false; reconnecting = false; wentLive = false; reconnectAttempts = 0;
-        usbForwarded = false;   // saved devices are always Wi-Fi (a LAN rtsp URL), never the USB tunnel
+        // WebRTC (default): the phone reconnects TO us over its saved signaling target — the saved
+        // RTSP url doesn't apply, we just have to be listening. Dialing the old rtsp url here is what
+        // made "Connect never connects": the phone is a WebRTC client now, not an RTSP server.
+        if (cbTransport.SelectedIndex == 0)   // "Mic - low latency" (WebRTC)
+        {
+            StartWebrtcPairing();
+            if (webrtcMode) SetStatus(Amber, "Ready — tap “Reconnect to last PC” on your phone (or scan the QR).");
+            return;
+        }
+        usbForwarded = false;   // RTSP saved devices are always Wi-Fi (a LAN rtsp URL), never the USB tunnel
         phoneToken = token ?? "";   // the saved stop token authorizes stopping this phone
         Log("connect to saved device: " + url + " mic=" + useMic);
         previewHint.Text = "Connecting…";
