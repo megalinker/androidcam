@@ -90,7 +90,9 @@ gathering). Then DTLS‑SRTP media over UDP.
 | 2b | ✅ DONE. `receiver.exe --webrtc` (webrtc_receiver.cpp): PCAM3 signaling server + offerer + RTP→Opus decode → audio thread → `WasapiSink`. Verified with `webrtc_testsender.exe` (phone stand-in, real Opus): recorded CABLE Output shows a steady −18 dB tone for the full 6 s, no dropouts. | Me |
 | 3 | ✅ DONE. Real Pixel 10 Pro test: PCAM3 offer/answer, ICE, DTLS-SRTP, Opus mic capture, first RTP, CABLE render, GUI live status, and mic meter all pass on `0.5.0-webrtc.1`. A full-tunnel phone VPN must allow LAN traffic or be disconnected. | Tester device |
 | 4 | ✅ LATENCY GATE PASSED. Same phone/room/Wi-Fi/speakers: SRT `357.7 ± 17.0 ms` (median `360.4`, n=26) vs WebRTC `166.3 ± 26.1 ms` (median `166.9`, n=19). WebRTC wins by `191.4 ms` mean / `193.5 ms` median, a 53.5% reduction. Battery comparison remains optional follow-up. | Tester device |
-| 5 | Add **H.264 video** track both ends → full webcam. | Tester device |
+| 5a | ✅ DONE. Video codec bridge (`webrtc_video.exe`): libx264 moving-box → `H264RtpPacketizer` → DTLS-SRTP → `H264RtpDepacketizer` (Annex-B) → FFmpeg h264 decode. 87/90 frames at 320x240, 87 distinct box positions (motion preserved). | Me |
+| 5b | PC receiver: add a recvonly **H.264** track to webrtc_receiver.cpp → depacketize → FFmpeg decode → existing softcam/VideoConv sink; `requestKeyframe()` on connect. Extend webrtc_testsender to send H264 too; validate. | Me |
+| 5c | Phone: add a Camera2 → hardware-H.264 video track to WebRtcSender.kt (no B-frames, low-delay). Full webcam over WebRTC. | Tester device |
 | 6 | ✅ DONE for v0.5.0. WebRTC is the default mic-only mode, RTSP is the camera compatibility fallback, and PCAM2/SRT is retired. Phone-first reconnect now retries until the PC listener starts. | Tester device |
 
 Gate result: **GO** on the Pixel 10 Pro. WebRTC beat SRT by 191.4 ms mean

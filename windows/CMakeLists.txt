@@ -87,6 +87,11 @@ if(WITH_WEBRTC)
     target_include_directories(webrtc_testsender PRIVATE "${FFMPEG_ROOT}/include")
     target_link_directories(webrtc_testsender PRIVATE "${FFMPEG_ROOT}/lib")
     target_link_libraries(webrtc_testsender PRIVATE LibDataChannel::LibDataChannel avcodec avutil ws2_32)
+    # Phase 5a: video codec bridge — libdatachannel H264 RTP <-> FFmpeg (encode moving box -> decode -> verify).
+    add_executable(webrtc_video src/webrtc_video.cpp)
+    target_include_directories(webrtc_video PRIVATE "${FFMPEG_ROOT}/include")
+    target_link_directories(webrtc_video PRIVATE "${FFMPEG_ROOT}/lib")
+    target_link_libraries(webrtc_video PRIVATE LibDataChannel::LibDataChannel avcodec avutil)
     message(STATUS "WebRTC path enabled (libdatachannel)")
 endif()
 
