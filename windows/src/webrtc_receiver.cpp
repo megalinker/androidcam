@@ -168,12 +168,17 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
     AVCodecContext *decCtxV = nullptr;
     VideoSink       videoSink(30.0, cfg.wantPreview);
     std::shared_ptr<rtc::Track> vtrack;
+    // libdatachannel dispatches track callbacks from a thread pool, so audio onMessage and video
+    // onFrame (and successive video frames) can run concurrently. Serialize all decode: the FFmpeg
+    // decoders and the VideoSink buffer are not thread-safe (real-phone streams corrupt the heap).
+    std::mutex decodeMutex;
 
     pc->onStateChange([&disconnected, &vtrack](rtc::PeerConnection::State s) {
         using S = rtc::PeerConnection::State;
         if (s == S::Connected) {
             fprintf(stderr, "[webrtc] connected — media flowing\n");
-            if (vtrack) vtrack->requestKeyframe();   // PLI: start video without waiting for the GOP
+            // PLI to start video without waiting for the GOP; harmless if the track isn't open yet.
+            if (vtrack) { try { vtrack->requestKeyframe(); } catch (...) {} }
         }
         if (s == S::Disconnected || s == S::Failed || s == S::Closed) {
             fprintf(stderr, "[webrtc] peer state=%d\n", (int)s);
@@ -202,6 +207,7 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
         int off = rtpPayloadOffset(p, (int)b.size());
         if (off < 0 || off >= (int)b.size()) return;
         if (++rtpCount == 1) fprintf(stderr, "[webrtc] first RTP received\n");
+        std::lock_guard<std::mutex> lk(decodeMutex);
         AVPacket *pk = av_packet_alloc();
         pk->data = const_cast<uint8_t *>(p + off);
         pk->size = (int)b.size() - off;
@@ -234,7 +240,8 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
         auto depack = std::make_shared<rtc::H264RtpDepacketizer>(rtc::NalUnit::Separator::StartSequence);
         depack->addToChain(std::make_shared<rtc::RtcpReceivingSession>());
         vtrack->setMediaHandler(depack);
-        vtrack->onFrame([&videoSink, decCtxV](rtc::binary data, rtc::FrameInfo) {
+        vtrack->onFrame([&, decCtxV](rtc::binary data, rtc::FrameInfo) {
+            std::lock_guard<std::mutex> lk(decodeMutex);
             AVPacket *pk = av_packet_alloc();
             if (av_new_packet(pk, (int)data.size()) == 0) {
                 std::memcpy(pk->data, data.data(), data.size());
