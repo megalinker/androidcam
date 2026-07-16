@@ -166,7 +166,7 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
     // Video state (set up below only when cfg.wantVideo). Declared here so onStateChange can ask
     // for a keyframe the moment we connect (instead of waiting a full GOP for the phone's next IDR).
     AVCodecContext *decCtxV = nullptr;
-    VideoSink       videoSink(30.0);
+    VideoSink       videoSink(30.0, cfg.wantPreview);
     std::shared_ptr<rtc::Track> vtrack;
 
     pc->onStateChange([&disconnected, &vtrack](rtc::PeerConnection::State s) {

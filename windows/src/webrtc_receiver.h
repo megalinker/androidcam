@@ -12,7 +12,8 @@ struct WebrtcRecvConfig {
     std::string audioDevice;       // WASAPI endpoint substring (e.g. "CABLE Input")
     float       micGainDb = 0.0f;  // mic boost (soft-limited in the sink)
     std::string eqPreset;          // voice EQ preset / band list
-    bool        wantVideo = false; // also offer a recvonly H.264 video track -> softcam (Phase 5)
+    bool        wantVideo = false;   // also offer a recvonly H.264 video track -> softcam (Phase 5)
+    bool        wantPreview = false;  // show/embed a GDI preview window of the decoded video
 };
 
 // Runs until *running becomes false (Ctrl+C in receiver.exe). Re-listens between phone sessions.

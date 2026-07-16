@@ -400,6 +400,7 @@ int main(int argc, char** argv) {
         cfg.micGainDb   = opt.micGainDb;
         cfg.eqPreset    = opt.eqPreset;
         cfg.wantVideo   = opt.webrtcVideo;
+        cfg.wantPreview = opt.preview;
         return run_webrtc_session(cfg, &g_running);
     }
 #endif

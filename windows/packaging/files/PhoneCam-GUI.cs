@@ -206,7 +206,7 @@ public class PhoneCamGui : Form
         // WebRTC is the default mic-only path. RTSP remains available for camera sessions.
         Controls.Add(new Label { Text = "Wi-Fi mode", ForeColor = Sub, Font = new Font("Segoe UI", 8.25f), Location = new Point(24, 328), AutoSize = true });
         cbTransport = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(112, 325), Width = 134, FlatStyle = FlatStyle.Flat, BackColor = Card, ForeColor = Fg };
-        cbTransport.Items.AddRange(new object[] { "Mic - low latency", "Camera - standard" });
+        cbTransport.Items.AddRange(new object[] { "Low latency ⚡ (WebRTC)", "Camera - standard" });
         cbTransport.SelectedIndex = 0;
         cbTransport.SelectedIndexChanged += (s, e) => UpdateTransportUi();
         rbUsb.CheckedChanged += (s, e) => UpdateTransportUi();
@@ -649,8 +649,11 @@ public class PhoneCamGui : Form
         controlHost = ""; controlPort = PhoneControlPort;              // no stop channel (phone stops when we do)
         pairedHost = ""; phoneToken = "";
         videoSeen = false; audioSeen = false; reachIssue = false; authIssue = false; micLevel = 0f;
+        // Offer video too (+ embed the preview): if the phone streams Cam+Mic it comes through the
+        // softcam virtual camera; if it's mic-only the video track just stays idle. One low-latency mode.
         var a = new List<string> {
-            "--webrtc", "--sig-port", WebrtcSigPort.ToString(), "--sig-secret", webrtcSecret,
+            "--webrtc", "--webrtc-video", "--preview",
+            "--sig-port", WebrtcSigPort.ToString(), "--sig-secret", webrtcSecret,
             "--audio-device", "CABLE Input"
         };
         int bi = cbBoost.SelectedIndex; if (bi < 0 || bi >= BoostDb.Length) bi = 2;

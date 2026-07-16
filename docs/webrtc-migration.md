@@ -93,6 +93,7 @@ gathering). Then DTLS‑SRTP media over UDP.
 | 5a | ✅ DONE. Video codec bridge (`webrtc_video.exe`): libx264 moving-box → `H264RtpPacketizer` → DTLS-SRTP → `H264RtpDepacketizer` (Annex-B) → FFmpeg h264 decode. 87/90 frames at 320x240, 87 distinct box positions (motion preserved). | Me |
 | 5b | ✅ DONE. `receiver.exe --webrtc-video` (webrtc_receiver.cpp + new video_sink.cpp): recvonly H.264 track → `H264RtpDepacketizer` → FFmpeg decode → `VideoSink` (→ softcam under HAVE_SOFTCAM); `requestKeyframe()` on connect. Validated with webrtc_testsender (now sends Opus+H264): 120+ frames at 320x240 + audio concurrent. GUI wiring + preview embed for cam+mic-over-WebRTC is a follow-on. | Me |
 | 5c | Phone: add a Camera2 → hardware-H.264 video track to WebRtcSender.kt (no B-frames, low-delay). Full webcam over WebRTC. | Tester device |
+| 5-GUI | ✅ DONE. GUI "Low latency ⚡ (WebRTC)" transport launches `receiver.exe --webrtc --webrtc-video --preview`; VideoSink gained a preview thread (owns the GDI window, fed a shared BGR buffer from the decode thread) so the GUI embeds the cam feed. One low-latency mode carries mic or cam+mic per the phone's mode. Needs tester to validate real phone→PC video. | Me |
 | 6 | ✅ DONE for v0.5.0. WebRTC is the default mic-only mode, RTSP is the camera compatibility fallback, and PCAM2/SRT is retired. Phone-first reconnect now retries until the PC listener starts. | Tester device |
 
 Gate result: **GO** on the Pixel 10 Pro. WebRTC beat SRT by 191.4 ms mean
