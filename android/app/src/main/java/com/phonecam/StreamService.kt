@@ -283,7 +283,8 @@ class StreamService : Service(), ConnectChecker {
             stopSelf(); return
         }
         try {
-            val sender = WebRtcSender(applicationContext, sigHost, sigPort, sigSecret, mode != Mode.MIC_ONLY) { state ->
+            val sender = WebRtcSender(applicationContext, sigHost, sigPort, sigSecret,
+                mode != Mode.MIC_ONLY, mode != Mode.CAMERA_ONLY) { state ->
                 when (state) {
                     WebRtcSender.State.CONNECTED -> {
                         clientConnected = true; everConnected = true

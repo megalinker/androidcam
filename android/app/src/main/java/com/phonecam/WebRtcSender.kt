@@ -14,6 +14,7 @@ import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
+import org.webrtc.RtpParameters
 import org.webrtc.RtpReceiver
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
@@ -48,6 +49,7 @@ class WebRtcSender(
     private val port: Int,
     private val secret: String,
     private val withVideo: Boolean,
+    private val withAudio: Boolean,
     private val onState: (State) -> Unit,
 ) {
     enum class State { CONNECTING, CONNECTED, DISCONNECTED, FAILED }
@@ -115,11 +117,14 @@ class WebRtcSender(
         // Sendonly mic track. addTrack before setRemoteDescription: Unified Plan associates this
         // transceiver with the offer's audio m-line, and the negotiated answer direction becomes
         // sendonly (our sendrecv ∩ their recvonly-offer).
-        val src = factory!!.createAudioSource(MediaConstraints())
-        audioSource = src
-        val track = factory!!.createAudioTrack("mic0", src).apply { setEnabled(true) }
-        audioTrack = track
-        peer.addTrack(track, listOf("pcam"))
+        // Mic track only when the mode wants it — Camera-only must NOT leak the mic.
+        if (withAudio) {
+            val src = factory!!.createAudioSource(MediaConstraints())
+            audioSource = src
+            val track = factory!!.createAudioTrack("mic0", src).apply { setEnabled(true) }
+            audioTrack = track
+            peer.addTrack(track, listOf("pcam"))
+        }
 
         // Camera → H.264 video track (added after audio to match the PC offer's m-line order).
         if (withVideo) startCamera(peer, egl)
@@ -201,7 +206,14 @@ class WebRtcSender(
         capturer.startCapture(1280, 720, 30)
         val vtrack = factory!!.createVideoTrack("cam0", vsrc).apply { setEnabled(true) }
         videoTrack = vtrack
-        peer.addTrack(vtrack, listOf("pcam"))
+        val sender = peer.addTrack(vtrack, listOf("pcam"))
+        // Low-latency intent: on a weak link keep motion smooth and let WebRTC shed resolution
+        // rather than framerate. Best-effort — falls back to WebRTC's default if the API differs.
+        runCatching {
+            val p = sender.parameters
+            p.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
+            sender.parameters = p
+        }
         Log.i(TAG, "webrtc: camera track added ($camName, 720p30)")
     }
 
