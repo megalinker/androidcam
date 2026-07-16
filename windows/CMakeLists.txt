@@ -68,7 +68,7 @@ endif()
 option(WITH_WEBRTC "Build the WebRTC (libdatachannel) receiver path" OFF)
 if(WITH_WEBRTC)
     find_package(LibDataChannel CONFIG REQUIRED)
-    target_sources(receiver PRIVATE src/webrtc_receiver.cpp)   # --webrtc receive path
+    target_sources(receiver PRIVATE src/webrtc_receiver.cpp src/video_sink.cpp)   # --webrtc receive path + H264 sink
     target_link_libraries(receiver PRIVATE LibDataChannel::LibDataChannel ws2_32)
     target_compile_definitions(receiver PRIVATE HAVE_WEBRTC)
     # Phase 1 de-risk: in-process DTLS-SRTP media loopback.

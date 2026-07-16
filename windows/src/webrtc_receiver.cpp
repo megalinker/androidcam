@@ -13,6 +13,7 @@
 
 #include "webrtc_receiver.h"
 #include "wasapi_sink.h"
+#include "video_sink.h"   // Phase 5: H.264 -> softcam virtual camera
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -162,9 +163,18 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
     std::atomic<bool> disconnected{false};
     std::atomic<int>  rtpCount{0};
 
-    pc->onStateChange([&disconnected](rtc::PeerConnection::State s) {
+    // Video state (set up below only when cfg.wantVideo). Declared here so onStateChange can ask
+    // for a keyframe the moment we connect (instead of waiting a full GOP for the phone's next IDR).
+    AVCodecContext *decCtxV = nullptr;
+    VideoSink       videoSink(30.0);
+    std::shared_ptr<rtc::Track> vtrack;
+
+    pc->onStateChange([&disconnected, &vtrack](rtc::PeerConnection::State s) {
         using S = rtc::PeerConnection::State;
-        if (s == S::Connected)    fprintf(stderr, "[webrtc] connected — media flowing\n");
+        if (s == S::Connected) {
+            fprintf(stderr, "[webrtc] connected — media flowing\n");
+            if (vtrack) vtrack->requestKeyframe();   // PLI: start video without waiting for the GOP
+        }
         if (s == S::Disconnected || s == S::Failed || s == S::Closed) {
             fprintf(stderr, "[webrtc] peer state=%d\n", (int)s);
             disconnected = true;
@@ -212,6 +222,33 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
         av_packet_free(&pk);
     });
 
+    // Optional recvonly H.264 video: depacketize (Annex-B) -> FFmpeg decode -> softcam (Phase 5).
+    if (cfg.wantVideo) {
+        const AVCodec *decv = avcodec_find_decoder(AV_CODEC_ID_H264);
+        decCtxV = avcodec_alloc_context3(decv);
+        avcodec_open2(decCtxV, decv, nullptr);
+        rtc::Description::Video vmedia("video", rtc::Description::Direction::RecvOnly);
+        vmedia.addH264Codec(96);
+        vmedia.addSSRC(43, "video");
+        vtrack = pc->addTrack(vmedia);
+        auto depack = std::make_shared<rtc::H264RtpDepacketizer>(rtc::NalUnit::Separator::StartSequence);
+        depack->addToChain(std::make_shared<rtc::RtcpReceivingSession>());
+        vtrack->setMediaHandler(depack);
+        vtrack->onFrame([&videoSink, decCtxV](rtc::binary data, rtc::FrameInfo) {
+            AVPacket *pk = av_packet_alloc();
+            if (av_new_packet(pk, (int)data.size()) == 0) {
+                std::memcpy(pk->data, data.data(), data.size());
+                if (avcodec_send_packet(decCtxV, pk) == 0) {
+                    AVFrame *fr = av_frame_alloc();
+                    while (avcodec_receive_frame(decCtxV, fr) == 0) { videoSink.WriteFrame(fr); av_frame_unref(fr); }
+                    av_frame_free(&fr);
+                }
+            }
+            av_packet_free(&pk);
+        });
+        fprintf(stderr, "[webrtc] offering video (H264) + audio (Opus)\n");
+    }
+
     pc->setLocalDescription();                          // -> gather -> onGatheringStateChange sends 'O'
 
     // Wait for the phone's answer (blocking; it replies promptly after the offer).
@@ -229,9 +266,12 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
     pc.reset();                                         // ensure no more onMessage before we free decCtx
     fq.signalStop();
     at.join();
+    videoSink.Stop();
+    if (decCtxV) avcodec_free_context(&decCtxV);
     avcodec_free_context(&decCtx);
     avcodec_free_context(&sinkFmt);
-    fprintf(stderr, "[webrtc] session ended (rtp=%d) — listening again\n", rtpCount.load());
+    fprintf(stderr, "[webrtc] session ended (rtp=%d, vframes=%ld) — listening again\n",
+            rtpCount.load(), videoSink.frames());
 }
 
 int run_webrtc_session(const WebrtcRecvConfig &cfg, std::atomic<bool> *running) {

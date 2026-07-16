@@ -227,6 +227,7 @@ struct Options {
     std::string rtspUser;     // RTSP Basic-auth credentials (kept out of the logged URL)
     std::string rtspPass;
     bool        webrtc = false;   // --webrtc: run the WebRTC receive path instead of RTSP/SRT
+    bool        webrtcVideo = false;  // --webrtc-video: also receive an H.264 video track -> softcam
     int         sigPort = 0;      // --sig-port: PCAM3 TCP signaling port
     std::string sigSecret;        // --sig-secret: pairSecret gate
 };
@@ -266,6 +267,7 @@ static Options parse_args(int argc, char** argv) {
         else if (a == "--rtsp-user" && i + 1 < argc) o.rtspUser = argv[++i];
         else if (a == "--rtsp-pass" && i + 1 < argc) o.rtspPass = argv[++i];
         else if (a == "--webrtc") o.webrtc = true;
+        else if (a == "--webrtc-video") o.webrtcVideo = true;
         else if (a == "--sig-port" && i + 1 < argc) o.sigPort = atoi(argv[++i]);
         else if (a == "--sig-secret" && i + 1 < argc) o.sigSecret = argv[++i];
         else if (a.rfind("--", 0) == 0) fprintf(stderr, "ignoring unknown option: %s\n", a.c_str());
@@ -397,6 +399,7 @@ int main(int argc, char** argv) {
         cfg.audioDevice = opt.audioDevice;
         cfg.micGainDb   = opt.micGainDb;
         cfg.eqPreset    = opt.eqPreset;
+        cfg.wantVideo   = opt.webrtcVideo;
         return run_webrtc_session(cfg, &g_running);
     }
 #endif
