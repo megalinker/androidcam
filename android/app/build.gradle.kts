@@ -13,8 +13,8 @@ android {
         applicationId = "com.phonecam"
         minSdk = 21
         targetSdk = 34
-        versionCode = 34
-        versionName = "0.5.1"
+        versionCode = 35
+        versionName = "0.5.2"
     }
 
     // Release signing: CI decodes the keystore secret to a file and points these env vars at it,
@@ -66,14 +66,7 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")   // Material 3 UI
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")  // scan the PC's pairing QR
 
-    // RootEncoder — the phone acts as an RTSP *server* (phone hosts, the PC pulls).
-    // RTSP-Server 1.4.1 is the tested pair with RootEncoder core 2.7.2. Both come from JitPack
-    // (see the repositories block in ../settings.gradle.kts). Bump together after checking the
-    // RTSP-Server release notes for the core version it was tested against.
-    implementation("com.github.pedroSG94:RTSP-Server:1.4.1")
-    implementation("com.github.pedroSG94.RootEncoder:library:2.7.2")
-
-    // WebRTC media stack (org.webrtc.*) — Phase 0 of the WebRTC migration (docs/webrtc-migration.md).
-    // Pre-built, maintained; handles Oboe/AAudio capture, Opus/H264, and DTLS-SRTP.
+    // WebRTC media stack (org.webrtc.*) — the phone's only transport. Pre-built and maintained;
+    // handles Oboe/AAudio low-latency capture, Opus + H.264 (via MediaCodec), and DTLS-SRTP.
     implementation("io.getstream:stream-webrtc-android:1.3.10")
 }

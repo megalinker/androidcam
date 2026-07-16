@@ -74,10 +74,11 @@ Output: `windows\driver\src\x64\Release\package\VirtualAudioDriver.{sys,inf,cat}
    and **PhoneCam Audio** (output). Then run the receiver into the render endpoint and
    pick the mic in your app:
    ```powershell
-   .\build\Release\receiver.exe rtsp://<phone-ip>:8554/ --audio-device "PhoneCam Audio"
+   .\build\Release\receiver.exe --sig-port 8891 --sig-secret <hex> --audio-device "PhoneCam Audio"
    ```
-   Pick **PhoneCam Microphone** in Zoom/Teams/Discord. Talk near the phone — you should
-   hear it come through as mic input.
+   (or just start PhoneCam.exe with the driver installed and point its audio device at
+   "PhoneCam Audio"). Pick **PhoneCam Microphone** in Zoom/Teams/Discord. Talk near the
+   phone — you should hear it come through as mic input.
 
 Remove it later with `.\scripts\4-uninstall.ps1`.
 
@@ -90,7 +91,7 @@ Remove it later with `.\scripts\4-uninstall.ps1`.
 - **Signing:** self-signed test cert is fine for your own PC (steps above). **Distribution** needs an EV code-signing certificate + Microsoft Partner Center attestation signing — a different, paid process.
 - **Format match:** render at 48 kHz/16-bit to match the receiver and the app's WASAPI shared-mode; watch for drift between the network source clock and the device clock.
 - **VM audio:** some VMs virtualize audio oddly; if endpoints don't appear, test on real hardware.
-- Keep audio in the same RTSP session as video (already the case) so A/V stay in sync.
+- A/V sync is handled by WebRTC (shared RTP clock + RTCP), so this driver only has to render cleanly at the matched format.
 
 ## Status
 

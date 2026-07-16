@@ -1,6 +1,6 @@
 # Build & Run
 
-Two pieces: the **Android app** (build on Linux) and the **Windows receiver** (build on Windows). Both machines must be on the **same Wi-Fi/LAN**.
+Two pieces: the **Android app** (build on Linux) and the **Windows receiver** (build on Windows). Both machines must be on the **same Wi-Fi/LAN**. Media rides **WebRTC** (DTLS-SRTP, LAN-direct); the phone connects out to the PC after scanning its pairing QR.
 
 ## 1. Android app (on your Linux box)
 
@@ -12,24 +12,25 @@ Two pieces: the **Android app** (build on Linux) and the **Windows receiver** (b
 cd android
 gradle wrapper --gradle-version 8.7      # one-time: creates ./gradlew and the wrapper jar
 ./gradlew assembleDebug
-./gradlew installDebug                   # with a phone connected via adb + USB debugging
+./gradlew installDebug                    # with a phone connected via adb + USB debugging
 ```
 
-Then on the phone: open **PhoneCam**, pick a mode (Camera+Mic / Camera / Mic), grant permissions, press **Start**. The screen shows the pull URL, e.g. `rtsp://192.168.1.42:8554/`. It streams headless (no on-screen preview — view the feed on the PC).
+Then on the phone: open **PhoneCam**, pick a mode (Cam + Mic / Camera / Mic) and quality, grant permissions, tap **Scan**, and point the camera at the QR shown in the PhoneCam app on the PC. It streams headless (no on-screen preview — view the feed on the PC). The status card shows the PC it's connected to; after the first scan, **Reconnect** re-dials the saved PC.
 
-> **URL / VPN note:** the app shows the phone's **Wi-Fi (`wlan`) IPv4**, so the URL stays correct even when a VPN/cellular interface is present. But a **full-tunnel VPN** on the phone can still block inbound LAN connections entirely — if the PC can't reach the phone, turn the phone's VPN off, switch it to split-tunnel, or connect over USB.
->
-> **"Mic only"** still opens the camera (RootEncoder won't serve until the video encoder emits a keyframe) but only audio is sent. If you want the camera truly off, that's a RootEncoder limitation — use it knowing the camera light stays on.
-
-> First run tip: if `prepareVideo(1920x1080…)` fails on a weaker phone, lower it to `1280×720` / `4_000_000` bps in [StreamService.kt](../android/app/src/main/java/com/phonecam/StreamService.kt).
+> **VPN note:** a **full-tunnel VPN** on the phone can block LAN connections entirely — if the phone can't reach the PC, turn the phone's VPN off, switch it to split-tunnel, or enable "Allow LAN traffic". Media is host-candidate-only (no STUN/TURN), so both devices must be able to reach each other directly on the LAN.
 
 ## 2. Windows receiver (on Windows 10/11 — real box or a VM)
 
 One-time setup:
 
-1. Install **Visual Studio 2022** (Desktop C++), CMake.
-2. **FFmpeg** shared dev build → extract to `windows/third_party/ffmpeg/` (`include/ lib/ bin/`).
-3. (For the camera sink) clone + build **softcam**, and register it once:
+1. Install **Visual Studio 2022** (Desktop C++), CMake, and **[vcpkg](https://github.com/microsoft/vcpkg)**.
+2. WebRTC media stack via vcpkg:
+   ```powershell
+   vcpkg install "libdatachannel[core,srtp,ws]:x64-windows" "libsrtp[openssl]:x64-windows" `
+     --overlay-ports=windows/vcpkg-overlays
+   ```
+3. **FFmpeg** shared dev build → extract to `windows/third_party/ffmpeg/` (`include/ lib/ bin/`).
+4. (For the camera sink) clone + build **softcam**, and register it once:
    ```powershell
    git clone https://github.com/tshino/softcam windows/third_party/softcam
    # build softcam.sln in Release for BOTH x64 and Win32 → softcam.dll (+ softcamcore.lib)
@@ -38,51 +39,45 @@ One-time setup:
    regsvr32 <path>\Win32\softcam.dll
    ```
 
-Build & run:
+Build:
 
 ```powershell
 cd windows
-cmake -B build -A x64
+cmake -B build -A x64 -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
 cmake --build build --config Release
 
-# 1. Smoke test — see the video in a window + hear the mic on your speakers.
-#    Proves the whole Wi-Fi -> decode path with zero drivers installed.
-.\build\Release\receiver.exe rtsp://<phone-ip>:8554/ --preview
-
-# 2. Enable the softcam virtual camera (after building + registering softcam):
-cmake -B build -A x64 -DWITH_SOFTCAM=ON `
-  -DSOFTCAM_ROOT="%CD%\third_party\softcam" `
-  -DSOFTCAM_LIB="<path>\softcamcore.lib"
+# with the softcam virtual camera enabled:
+cmake -B build -A x64 -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake `
+  -DWITH_SOFTCAM=ON -DSOFTCAM_ROOT="%CD%\third_party\softcam" -DSOFTCAM_LIB="<path>\softcamcore.lib"
 cmake --build build --config Release
-.\build\Release\receiver.exe rtsp://<phone-ip>:8554/
 ```
 
-Flags: `--preview` (GDI video window), `--no-audio`, `--audio-device <name-substr>` (target a specific output, e.g. the Phase-2 `PhoneCam Audio` endpoint), `--udp` (lower-latency RTSP transport), `--smooth` (jitter buffer for weak Wi-Fi, trades latency for smoothness).
+Run: open **PhoneCam.exe** (the desktop app) — it generates the pairing secret, shows the QR, and launches the receiver. Or run the receiver directly with a signaling port + secret and encode a matching `PCAM3:<pc-ip>:<port>:<secret>` QR for the phone:
+
+```powershell
+.\build\Release\receiver.exe --sig-port 8891 --sig-secret <hex> --webrtc-video --preview --audio-device "CABLE Input"
+```
 
 Open Zoom/Teams/Discord/OBS/Chrome and choose **PhoneCam Camera**. (It won't appear in the built-in Windows *Camera* app — that's Media-Foundation-only; conferencing apps are DirectShow and will see it.)
 
-The receiver **auto-reconnects** (every 2s) if the phone sleeps or the stream drops — leave it running.
+The receiver keeps the signaling port open and **auto-reconnects** if the phone sleeps or the link drops — leave it (or the desktop app) running.
 
-### Validate without the phone (test harness)
+### Validate without the phone (de-risk tools)
 
-Before the phone app is even installed, serve a synthetic RTSP stream and point the receiver at it:
+The `WITH_WEBRTC_TESTS` CMake option builds standalone harnesses that stand in for the phone or exercise a single layer — `webrtc_testsender` connects to the receiver's PCAM3 port and sends real Opus + H.264, and `webrtc_audio`/`webrtc_video` bridge an RTP track through the FFmpeg codecs:
 
 ```powershell
-# Terminal A — needs ffmpeg on PATH (it ships in windows\third_party\ffmpeg\bin):
-.\scripts\test-source.ps1
-# Terminal B:
-.\build\Release\receiver.exe rtsp://127.0.0.1:8554/live --preview
+cmake -B build -A x64 -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake -DWITH_WEBRTC_TESTS=ON
+cmake --build build --config Release
 ```
 
-The preview window shows a moving test pattern (its title bar shows live **fps + resolution**) and your speakers play a 440 Hz tone — proving the decode + WASAPI path with no phone and no drivers. Use [../windows/scripts/test-source.sh](../windows/scripts/test-source.sh) to serve from a Linux/macOS box across the LAN instead.
+## 3. The microphone
 
-## 3. Phase 2 — the microphone
-
-The receiver already **renders** the phone audio to a WASAPI endpoint (you can hear it on your speakers now). To make Windows expose a selectable **PhoneCam Microphone**, build the kernel virtual-audio **loopback** driver — follow the runbook in [../windows/driver/README.md](../windows/driver/README.md), which uses the ready-made test-sign/install scripts in [../windows/driver/scripts/](../windows/driver/scripts/) — then run `receiver.exe --audio-device "PhoneCam Audio"`. This driver is the part that needs the WDK and driver signing (test-signing is fine for your own PC).
+The receiver already **renders** the phone audio to a WASAPI endpoint (you can hear it on your speakers with `--audio-device` pointed at them). To make Windows expose a selectable microphone, feed it into a **virtual audio cable** — install **[VB-CABLE](https://vb-audio.com/Cable/)** (free, Microsoft-signed) and run `receiver.exe … --audio-device "CABLE Input"`, then pick **CABLE Output** as the mic in your app. A branded, self-contained **PhoneCam Microphone** kernel driver is the optional alternative — see [../windows/driver/README.md](../windows/driver/README.md) — but it needs the WDK and driver signing.
 
 ## Troubleshooting
 
-- **PC can't connect:** confirm both devices are on the same subnet; some routers isolate Wi-Fi clients ("AP isolation"/guest network) — turn that off. Check the phone's firewall isn't blocking port 8554.
-- **Phone slept / stream dropped:** the receiver **auto-reconnects every 2s** — just wake the phone or re-press Start; no need to restart `receiver.exe`.
-- **Stutter/latency over Wi-Fi:** use 5 GHz, lower the bitrate, or try `rtsp_transport=udp` in [receiver.cpp](../windows/src/receiver.cpp).
+- **PC can't connect:** confirm both devices are on the same subnet; some routers isolate Wi-Fi clients ("AP isolation"/guest network) — turn that off. Make sure Windows Firewall allows PhoneCam (the installer adds the rules; a manual build needs an inbound allow for the signaling port).
+- **Phone slept / link dropped:** the receiver keeps listening and the phone retries the saved PC — just wake the phone or tap Reconnect; no need to restart the receiver.
+- **Stutter/latency over Wi-Fi:** use 5 GHz and keep both devices off a congested channel. WebRTC adapts bitrate and sheds resolution under congestion on its own.
 - **`scCreateCamera failed`:** only one softcam camera can exist system-wide; close any other app using it, and make sure you registered `softcam.dll`.

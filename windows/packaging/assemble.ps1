@@ -16,12 +16,11 @@ foreach ($d in @('bin','bin\softcam\x64','bin\softcam\Win32','bin\adb','redist')
 
 $rel = Join-Path $win 'build\Release'
 Copy-Item (Join-Path $rel 'receiver.exe') (Join-Path $OutDir 'bin') -Force
-foreach ($d in 'avformat-63','avcodec-63','avutil-61','swscale-10','swresample-7') { Copy-Item (Join-Path $rel "$d.dll") (Join-Path $OutDir 'bin') -Force }
+# FFmpeg codecs only (Opus + H.264 decode, resample, scale) — the transport is WebRTC, so no avformat.
+foreach ($d in 'avcodec-63','avutil-61','swscale-10','swresample-7') { Copy-Item (Join-Path $rel "$d.dll") (Join-Path $OutDir 'bin') -Force }
 foreach ($d in 'datachannel','juice','srtp2','libcrypto-3-x64','libssl-3-x64') { Copy-Item (Join-Path $rel "$d.dll") (Join-Path $OutDir 'bin') -Force }
 Copy-Item (Join-Path $win 'third_party\softcam\dist\bin\x64\softcam.dll')   (Join-Path $OutDir 'bin\softcam\x64')   -Force
 Copy-Item (Join-Path $win 'third_party\softcam\dist\bin\Win32\softcam.dll') (Join-Path $OutDir 'bin\softcam\Win32') -Force
-Copy-Item (Join-Path $PSScriptRoot 'files\phonecam.ps1') (Join-Path $OutDir 'bin') -Force
-Copy-Item (Join-Path $PSScriptRoot 'files\PhoneCam.bat') $OutDir -Force
 Copy-Item (Join-Path $PSScriptRoot 'files\README.txt')   $OutDir -Force
 
 # Compile the windowed launcher PhoneCam.exe. Prefer the Roslyn csc from the installed

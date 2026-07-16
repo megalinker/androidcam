@@ -10,7 +10,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import android.view.View
 import android.widget.TextView
 import android.widget.Toast
@@ -25,15 +24,18 @@ import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 
 /**
- * Single-screen UI: pick a mode (Cam + Mic / Camera / Mic) and quality, press Start, and the
- * card shows the pull address (tap to copy) plus a live "PC connected" indicator. The heavy
- * lifting is in [StreamService]; this activity only drives it and polls its state once a second.
+ * Single-screen UI: pick a mode (Cam + Mic / Camera / Mic) and quality, then scan the QR the
+ * PhoneCam app shows on your PC (or one-tap reconnect to the last PC). The phone connects out to
+ * the PC over WebRTC (DTLS-SRTP, LAN-direct); the card shows the link status. The heavy lifting is
+ * in [StreamService]; this activity only drives it and polls its state once a second.
  */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var modeGroup: MaterialButtonToggleGroup
     private lateinit var qualityInput: MaterialAutoCompleteTextView
-    private lateinit var startBtn: MaterialButton
+    private lateinit var stopBtn: MaterialButton
+    private lateinit var scanBtn: MaterialButton
+    private lateinit var reconnectBtn: MaterialButton
     private lateinit var statusCard: MaterialCardView
     private lateinit var idleHint: View
     private lateinit var urlText: TextView
@@ -43,11 +45,8 @@ class MainActivity : AppCompatActivity() {
     private val ui = Handler(Looper.getMainLooper())
     private val qualities = StreamService.Quality.values()
 
-    // Wi-Fi pairing: the PC target from the last scanned QR, held across the permission prompt.
-    private var pendingTarget: PcTarget? = null
-    private var pendingWebrtc: WebrtcTarget? = null   // same, for a WebRTC (PCAM3) code
-    // A note shown in the status card while streaming but not yet connected (e.g. announce failed).
-    private var pairingNote: String? = null
+    // The PC target from the last scanned QR, held across the permission prompt.
+    private var pendingWebrtc: WebrtcTarget? = null
     private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
         result.contents?.let { onScanned(it) }
     }
@@ -64,7 +63,9 @@ class MainActivity : AppCompatActivity() {
 
         modeGroup = findViewById(R.id.modeGroup)
         qualityInput = findViewById(R.id.qualityInput)
-        startBtn = findViewById(R.id.startBtn)
+        stopBtn = findViewById(R.id.startBtn)
+        scanBtn = findViewById(R.id.scanBtn)
+        reconnectBtn = findViewById(R.id.reconnectBtn)
         statusCard = findViewById(R.id.statusCard)
         idleHint = findViewById(R.id.idleHint)
         urlText = findViewById(R.id.urlText)
@@ -76,17 +77,14 @@ class MainActivity : AppCompatActivity() {
         qualityInput.setSimpleItems(qualities.map { it.label }.toTypedArray())
         restoreSelections()
 
-        startBtn.setOnClickListener {
-            if (StreamService.isRunning) stopStreaming()
-            else if (ensurePermissions()) startStreaming()
-        }
-        findViewById<MaterialButton>(R.id.scanBtn).setOnClickListener { launchScan() }
-        findViewById<MaterialButton>(R.id.reconnectBtn).setOnClickListener { reconnectWebrtc() }
+        stopBtn.setOnClickListener { if (StreamService.isRunning) stopStreaming() }
+        scanBtn.setOnClickListener { launchScan() }
+        reconnectBtn.setOnClickListener { reconnectWebrtc() }
         urlText.setOnClickListener { copyUrl() }
         findViewById<MaterialButton>(R.id.switchCamBtn).setOnClickListener { switchCamera() }
     }
 
-    // --- Wi-Fi pairing (scan the PC's QR) ---
+    // --- pairing (scan the PC's QR) ---
 
     private fun launchScan() {
         scanLauncher.launch(
@@ -99,36 +97,25 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onScanned(payload: String) {
-        if (payload.trim().startsWith("PCAM3:")) {                 // WebRTC (low-latency, encrypted) code
-            val wr = WebrtcTarget.parse(payload)
-            if (wr == null) {
-                Toast.makeText(this, "That isn't a valid PhoneCam code.", Toast.LENGTH_SHORT).show()
-                return
-            }
-            pendingWebrtc = wr
-            if (ensurePermissions()) beginWebrtc()
+        val wr = WebrtcTarget.parse(payload)
+        if (wr == null) {
+            Toast.makeText(this, "That isn't a valid PhoneCam code.", Toast.LENGTH_SHORT).show()
             return
         }
-        val target = PcTarget.parse(payload)
-        if (target == null) {
-            Toast.makeText(this, "That isn't a PhoneCam PC code.", Toast.LENGTH_SHORT).show()
-            return
-        }
-        pendingTarget = target
-        if (ensurePermissions()) beginPairing()   // else resumed from onRequestPermissionsResult
+        pendingWebrtc = wr
+        if (ensurePermissions()) beginWebrtc()   // else resumed from onRequestPermissionsResult
     }
 
-    /** WebRTC mode (mic-only): answer the scanned PC's PCAM3 offer. Phone connects out; no announce-back. */
+    /** Answer the scanned PC's PCAM3 offer. The phone connects out; there is no announce-back. */
     private fun beginWebrtc() {
         val wr = pendingWebrtc ?: return
         pendingWebrtc = null
-        pairingNote = null
         saveWebrtcTarget(wr)   // remember for one-tap reconnect
-        if (!StreamService.isRunning) startWebrtcStreaming(wr)
-        Toast.makeText(this, "Connecting (WebRTC) to ${wr.host}…", Toast.LENGTH_SHORT).show()
+        if (!StreamService.isRunning) startStreaming(wr)
+        Toast.makeText(this, "Connecting to ${wr.host}…", Toast.LENGTH_SHORT).show()
     }
 
-    /** One-tap reconnect to the last WebRTC PC — no QR. */
+    /** One-tap reconnect to the last PC — no QR. */
     private fun reconnectWebrtc() {
         savedWebrtcTarget()?.let { pendingWebrtc = it; if (ensurePermissions()) beginWebrtc() }
     }
@@ -147,7 +134,7 @@ class MainActivity : AppCompatActivity() {
         return WebrtcTarget(host, port, secret)
     }
 
-    private fun startWebrtcStreaming(wr: WebrtcTarget) {
+    private fun startStreaming(wr: WebrtcTarget) {
         // Honor the mode toggle: Cam+Mic streams H.264 video too, Mic-only stays audio-only.
         prefs.edit()
             .putString(KEY_MODE, selectedMode().name)
@@ -157,7 +144,6 @@ class MainActivity : AppCompatActivity() {
             action = StreamService.ACTION_START
             putExtra(StreamService.EXTRA_MODE, selectedMode().name)
             putExtra(StreamService.EXTRA_QUALITY, selectedQuality().name)
-            putExtra(StreamService.EXTRA_TRANSPORT, "webrtc")
             putExtra(StreamService.EXTRA_SIG_HOST, wr.host)
             putExtra(StreamService.EXTRA_SIG_PORT, wr.port)
             putExtra(StreamService.EXTRA_SIG_SECRET, wr.secret)
@@ -165,55 +151,11 @@ class MainActivity : AppCompatActivity() {
         ContextCompat.startForegroundService(this, intent)
     }
 
-    /** Start streaming (if needed), then announce our pull URL to the scanned PC on a worker thread. */
-    private fun beginPairing() {
-        val target = pendingTarget ?: return
-        pendingTarget = null
-        pairingNote = null
-        if (!StreamService.isRunning) startStreaming()
-        Toast.makeText(this, "Pairing with the PC…", Toast.LENGTH_SHORT).show()
-        val mode = selectedMode().name
-        Thread {
-            val url = waitForStreamUrl(6000)
-            if (url == null) {
-                ui.post { pairingNote = "Couldn't start the camera stream — try a lower Quality." }
-                return@Thread
-            }
-            val ok = PcLink.announce(target, url, mode, deviceName(), StreamService.controlToken(this))
-            ui.post {
-                pairingNote = if (ok) null
-                else "Reached out to the PC at ${target.host} but it didn't answer — is PhoneCam open on the PC, on the same Wi‑Fi, with its firewall allowing it?"
-                Toast.makeText(
-                    this,
-                    if (ok) "Sent to PC — it should connect now." else "Couldn't reach the PC at ${target.host}.",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
-        }.start()
-    }
-
-    /** A friendly name for this phone, sent to the PC so it can save us as a device (e.g. "Pixel 9 Pro"). */
-    private fun deviceName(): String {
-        val model = Build.MODEL ?: "phone"
-        val maker = Build.MANUFACTURER ?: ""
-        return if (maker.isNotEmpty() && !model.startsWith(maker, ignoreCase = true))
-            "$maker $model" else model
-    }
-
-    private fun waitForStreamUrl(timeoutMs: Long): String? {
-        val deadline = SystemClock.elapsedRealtime() + timeoutMs
-        while (SystemClock.elapsedRealtime() < deadline) {
-            StreamService.streamUrl?.let { return it }
-            Thread.sleep(150)
-        }
-        return null
-    }
-
     private fun copyUrl() {
         val url = StreamService.streamUrl ?: return
         (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-            .setPrimaryClip(ClipData.newPlainText("PhoneCam address", url))
-        Toast.makeText(this, "Address copied", Toast.LENGTH_SHORT).show()
+            .setPrimaryClip(ClipData.newPlainText("PhoneCam PC", url))
+        Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
     }
 
     /** Restore the last-used mode + quality from prefs (defaults if none saved). */
@@ -243,19 +185,6 @@ class MainActivity : AppCompatActivity() {
     private fun selectedQuality(): StreamService.Quality =
         qualities.firstOrNull { it.label == qualityInput.text.toString() } ?: StreamService.DEFAULT_QUALITY
 
-    private fun startStreaming() {
-        prefs.edit()
-            .putString(KEY_MODE, selectedMode().name)
-            .putString(KEY_QUALITY, selectedQuality().name)
-            .apply()
-        val intent = Intent(this, StreamService::class.java).apply {
-            action = StreamService.ACTION_START
-            putExtra(StreamService.EXTRA_MODE, selectedMode().name)
-            putExtra(StreamService.EXTRA_QUALITY, selectedQuality().name)
-        }
-        ContextCompat.startForegroundService(this, intent)
-    }
-
     private fun stopStreaming() {
         startService(Intent(this, StreamService::class.java).apply { action = StreamService.ACTION_STOP })
     }
@@ -267,13 +196,13 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    /** Mirror the service's state into the UI once a second (start/stop can come from the notification). */
+    /** Mirror the service's state into the UI once a second (stop can also come from the notification). */
     private fun refresh() {
         val running = StreamService.isRunning
-        startBtn.text = if (running) "Stop streaming" else "Start streaming"
-        findViewById<View>(R.id.scanBtn).visibility = if (running) View.GONE else View.VISIBLE
-        // One-tap reconnect: only useful when idle and we've paired with a WebRTC PC before.
-        findViewById<View>(R.id.reconnectBtn).visibility =
+        stopBtn.visibility = if (running) View.VISIBLE else View.GONE
+        scanBtn.visibility = if (running) View.GONE else View.VISIBLE
+        // One-tap reconnect: only useful when idle and we've paired with a PC before.
+        reconnectBtn.visibility =
             if (!running && savedWebrtcTarget() != null) View.VISIBLE else View.GONE
         statusCard.visibility = if (running) View.VISIBLE else View.GONE
         idleHint.visibility = if (running) View.GONE else View.VISIBLE
@@ -283,26 +212,24 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.qualityLayout).isEnabled = !running
         qualityInput.isEnabled = !running
 
-        if (!running) { pairingNote = null; return }
+        if (!running) return
 
         urlText.text = StreamService.streamUrl ?: ""
         val connected = StreamService.clientConnected
-        if (connected) pairingNote = null
-        // After a PC has connected once and dropped, say so plainly (it's not a fresh "waiting") and
+        // After a PC has connected once and dropped, say so plainly (it's not a fresh "connecting") and
         // make clear the phone will stop itself — so the user needn't hunt for the Stop button.
-        val dropped = !connected && StreamService.everConnected && pairingNote == null
+        val dropped = !connected && StreamService.everConnected
         pcStatus.text = when {
             connected -> "✓ PC connected"
-            pairingNote != null -> pairingNote!!
             dropped -> "PC disconnected — waiting to reconnect (auto-stops soon)…"
-            else -> "Waiting for the PC to connect…"
+            else -> "Connecting to the PC…"
         }
         pcStatus.setTextColor(
             ContextCompat.getColor(
                 this,
                 when {
                     connected -> R.color.pc_green
-                    pairingNote != null || dropped -> R.color.pc_amber
+                    dropped -> R.color.pc_amber
                     else -> R.color.pc_muted
                 }
             )
@@ -340,14 +267,10 @@ class MainActivity : AppCompatActivity() {
         val camOk = isGranted(permissions, grantResults, Manifest.permission.CAMERA)
         val micOk = isGranted(permissions, grantResults, Manifest.permission.RECORD_AUDIO)
         if (camOk && micOk) {
-            when {
-                pendingWebrtc != null -> beginWebrtc()
-                pendingTarget != null -> beginPairing()
-                else -> startStreaming()
-            }
+            if (pendingWebrtc != null) beginWebrtc()
         } else {
-            pendingTarget = null; pendingWebrtc = null
-            pcStatus.text = "Camera and microphone permissions are required."
+            pendingWebrtc = null
+            Toast.makeText(this, "Camera and microphone permissions are required.", Toast.LENGTH_LONG).show()
         }
     }
 

@@ -1,5 +1,5 @@
 ========================================================================
- PhoneCam 0.5.0 - Android camera and low-latency microphone for Windows
+ PhoneCam 0.5.2 - Android camera and low-latency microphone for Windows
 ========================================================================
 
 WHAT YOU NEED
@@ -10,22 +10,21 @@ WHAT YOU NEED
 
 FIRST-TIME SETUP
   1. Install PhoneCam.apk on the phone and allow camera/microphone access.
-  2. Open PhoneCam on Windows.
-  3. Select Wi-Fi - scan QR and leave the default Mic - low latency mode.
-  4. Press Start, then scan the displayed QR with the phone app.
-  5. In your call app, choose CABLE Output as the microphone.
+  2. Open PhoneCam on Windows - it shows a pairing QR.
+  3. On the phone, pick a mode (Cam + Mic / Camera / Mic) and quality.
+  4. Tap Scan on the phone and point it at the QR on the PC.
+  5. For video: in Zoom, Teams, Meet, Discord, or OBS choose "PhoneCam Camera".
+     For the mic: tick "Use microphone" on the PC, then choose CABLE Output as
+     the microphone in your call app.
 
-The phone's mic uses WebRTC with Opus and authenticated DTLS-SRTP encryption.
-Pairing and media stay on your LAN; there is no cloud signaling service.
+Media uses WebRTC with Opus (audio), H.264 (video), and authenticated
+DTLS-SRTP encryption. Pairing and media stay on your LAN, direct between the
+phone and PC; there is no cloud signaling service.
 
 RECONNECTING
   After the first scan, the phone shows Reconnect. Either side may be started
   first: the phone retries the saved PC endpoint while it waits for the Windows
   app to begin listening.
-
-CAMERA MODE
-  In the Windows Wi-Fi mode list, choose Camera - standard. Press Start and scan
-  the QR. In Zoom, Teams, Meet, Discord, or OBS choose PhoneCam Camera.
 
 TROUBLESHOOTING
   - A full-tunnel VPN can hide LAN devices. Disable it or enable Allow LAN traffic
@@ -38,7 +37,4 @@ TROUBLESHOOTING
 FILES
   PhoneCam.exe            - desktop app
   PhoneCam.apk            - Android app
-  PhoneCam.bat            - command-line RTSP camera fallback
-  1-Install-Camera.bat    - register the camera (portable build)
-  2-Uninstall-Camera.bat  - remove the camera registration
   bin\, redist\           - application files

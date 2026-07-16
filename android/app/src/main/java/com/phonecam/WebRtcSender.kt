@@ -41,7 +41,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   [1 byte type][4-byte big-endian length][payload],  S = pairSecret, O = offer, A = answer.
  *
  * org.webrtc handles Oboe/AAudio low-latency capture, Opus, DTLS-SRTP and congestion control; we
- * only drive the signaling handshake and lifecycle. RTSP remains the camera compatibility path.
+ * only drive the signaling handshake and lifecycle.
  */
 class WebRtcSender(
     private val appCtx: Context,
@@ -50,6 +50,9 @@ class WebRtcSender(
     private val secret: String,
     private val withVideo: Boolean,
     private val withAudio: Boolean,
+    private val videoW: Int,
+    private val videoH: Int,
+    private val videoFps: Int,
     private val onState: (State) -> Unit,
 ) {
     enum class State { CONNECTING, CONNECTED, DISCONNECTED, FAILED }
@@ -203,7 +206,8 @@ class WebRtcSender(
         val vsrc = factory!!.createVideoSource(false)   // isScreencast = false
         videoSource = vsrc
         capturer.initialize(helper, appCtx, vsrc.capturerObserver)
-        capturer.startCapture(1280, 720, 30)
+        // The selected Quality preset caps capture; WebRTC then sheds resolution under congestion.
+        capturer.startCapture(videoW, videoH, videoFps)
         val vtrack = factory!!.createVideoTrack("cam0", vsrc).apply { setEnabled(true) }
         videoTrack = vtrack
         val sender = peer.addTrack(vtrack, listOf("pcam"))
@@ -214,7 +218,14 @@ class WebRtcSender(
             p.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
             sender.parameters = p
         }
-        Log.i(TAG, "webrtc: camera track added ($camName, 720p30)")
+        Log.i(TAG, "webrtc: camera track added ($camName, ${videoW}x${videoH}@${videoFps})")
+    }
+
+    /** Toggle front/back camera on the running capture (no-op in audio-only mode). */
+    fun switchCamera() {
+        (videoCapturer as? org.webrtc.CameraVideoCapturer)?.let {
+            runCatching { it.switchCamera(null) }.onFailure { e -> Log.w(TAG, "switchCamera failed", e) }
+        }
     }
 
     /** Keep a saved-PC reconnect alive when the phone starts before the desktop listener. */

@@ -2,15 +2,14 @@
 
 Use an Android phone as a webcam or low-latency microphone on Windows 10/11 over the local network.
 
-The desktop app defaults to **WebRTC** (Opus over DTLS-SRTP), low-latency and authenticated. v0.5.1 adds **H.264 camera over WebRTC**, so cam+mic runs on the same low-latency path; **RTSP camera** stays as a compatibility fallback. SRT was retired after the real-device latency gate for v0.5.0.
+The media transport is **WebRTC** — Opus audio and H.264 camera over authenticated DTLS-SRTP, low-latency and LAN-direct. Camera and mic ride the same path. The earlier RTSP and SRT transports were retired once WebRTC video passed the real-device latency gate.
 
 ## How it works
 
 ```
-Android phone                                    Windows PC
-Mic    → Opus  ─┐                               ┌→ FFmpeg → WASAPI  → CABLE Output    (mic)
-Camera → H.264 ─┴─ WebRTC / DTLS-SRTP ─────────→┼→ FFmpeg → softcam → PhoneCam Camera  (low-latency)
-Camera → H.264 / AAC → RTSP ───────────────────→ FFmpeg → softcam → PhoneCam Camera   (compatibility)
+Android phone                                   Windows PC
+Mic    → Opus  ─┐                              ┌→ FFmpeg → WASAPI  → CABLE Output    (mic)
+Camera → H.264 ─┴─ WebRTC / DTLS-SRTP ────────→┴→ FFmpeg → softcam → PhoneCam Camera
 ```
 
 The phone's mode (mic / camera / both) decides which tracks it sends; the low-latency WebRTC path carries whatever it offers. Pairing is local and QR-bootstrapped — no cloud signaling, STUN, or TURN service is used.
@@ -36,7 +35,7 @@ phonecam/
 ## Prior art we lean on (all MIT/Apache — safe to fork)
 
 - [`darusc/VCamdroid`](https://github.com/darusc/VCamdroid) (MIT) — closest end-to-end reference: Android → Windows softcam virtual camera.
-- [`pedroSG94/RootEncoder`](https://github.com/pedroSG94/RootEncoder) (Apache-2.0) — Camera2 + MediaCodec and the on-device RTSP server used by camera mode.
+- [`stream-webrtc-android`](https://github.com/GetStream/webrtc-android) (BSD) — the prebuilt `org.webrtc` stack the phone uses for Opus/H.264 capture and DTLS-SRTP.
 - [`tshino/softcam`](https://github.com/tshino/softcam) (MIT) — DirectShow virtual camera with a tiny frame-push API.
 
 See [docs/architecture.md](docs/architecture.md) for the full design and the research behind these choices.

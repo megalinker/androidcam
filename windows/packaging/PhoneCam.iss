@@ -33,7 +33,6 @@ WizardStyle=modern
 ; look like the same "version 0.0.0.0" every build, so Inno's default rule skips overwriting them
 ; and every "update" silently keeps the old exe. ignoreversion = always replace our files.
 Source: "{#Payload}\PhoneCam.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Payload}\PhoneCam.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Payload}\README.txt";   DestDir: "{app}"; Flags: isreadme ignoreversion
 Source: "{#Payload}\PhoneCam.apk";  DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Payload}\bin\*";         DestDir: "{app}\bin"; Flags: recursesubdirs ignoreversion
@@ -41,7 +40,6 @@ Source: "{#Payload}\redist\*";      DestDir: "{tmp}\redist"; Flags: deleteafteri
 
 [Icons]
 Name: "{group}\PhoneCam";                     Filename: "{app}\PhoneCam.exe"; WorkingDir: "{app}"
-Name: "{group}\PhoneCam (command line)";      Filename: "{app}\PhoneCam.bat"; WorkingDir: "{app}"; IconFilename: "{app}\bin\receiver.exe"
 Name: "{group}\Install Android app (APK)";    Filename: "{app}\PhoneCam.apk"
 Name: "{group}\README";                       Filename: "{app}\README.txt"
 Name: "{group}\Uninstall PhoneCam";           Filename: "{uninstallexe}"

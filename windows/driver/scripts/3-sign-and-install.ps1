@@ -37,4 +37,4 @@ pnputil /add-driver "$InfPath" /install
 Write-Host ""
 Write-Host "Done. Look in Settings > System > Sound for 'PhoneCam Microphone' (input)" -ForegroundColor Green
 Write-Host "and 'PhoneCam Audio' (output). Then run the receiver with:" -ForegroundColor Green
-Write-Host '   receiver.exe rtsp://<phone-ip>:8554/ --audio-device "PhoneCam Audio"'
+Write-Host '   receiver.exe --sig-port 8891 --sig-secret <hex> --audio-device "PhoneCam Audio"'
