@@ -41,15 +41,4 @@ phonecam/
 
 See [docs/architecture.md](docs/architecture.md) for the full design and the research behind these choices.
 
-## Status
-
-**v0.5.0 validated on a Pixel 10 Pro** (2026-07-15): WebRTC pairing, Opus microphone capture, DTLS-SRTP media, CABLE rendering, live status, and the mic meter all passed on real hardware. Acoustic latency measured `166.3 ± 26.1 ms`, 53.5% below the retired SRT baseline.
-
-**v0.5.1 (in progress)** — H.264 **camera over WebRTC** → softcam, so cam+mic shares the low-latency path, with the decoded feed embedded in the desktop preview. The PC receive path is verified against a test sender (H.264 + Opus decoded concurrently); the first real phone→PC video still needs on-device validation of the libdatachannel↔libwebrtc H.264 profile handshake. Also fixes saved-device reconnect — the PC now *listens* for the phone's WebRTC reconnect instead of dialing the retired RTSP URL, and auto-listen defaults on.
-
-**Android app** — WebRTC sender for mic (Opus) and camera (hardware H.264); RTSP camera server as the compatibility fallback; QR pairing; one-tap WebRTC reconnect that waits for the PC app; camera/mic/both controls; quality presets and front/back switching.
-**Windows receiver** — WebRTC → Opus → WASAPI (mic) and WebRTC → H.264 → softcam (camera) on the low-latency path; RTSP → FFmpeg → softcam for compatibility; embedded preview, auto-reconnect, and mic metering.
-**Test harness** — `windows/scripts/test-source.*` serves a synthetic RTSP stream so you can validate the receiver with **no phone** and no drivers.
-**Microphone endpoint** — the packaged GUI targets VB-CABLE; the repository also retains the experimental kernel virtual-mic driver under `windows/driver/`.
-
 See [docs/build-and-run.md](docs/build-and-run.md) for how to run each side, and the subfolder READMEs for the `TODO` markers.
