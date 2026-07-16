@@ -7,24 +7,38 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # ---------------------------------------------------------------------------
 # FFmpeg (shared dev build). Download per windows/README.md and extract into
 # windows/third_party/ffmpeg so you have include/ lib/ bin/ under it.
+# We use FFmpeg for the codecs only (Opus + H.264 decode, resample, scale);
+# the transport is WebRTC (libdatachannel), so avformat is no longer needed.
 # ---------------------------------------------------------------------------
 set(FFMPEG_ROOT "${CMAKE_SOURCE_DIR}/third_party/ffmpeg" CACHE PATH "FFmpeg dev build root")
 if(NOT EXISTS "${FFMPEG_ROOT}/include")
     message(FATAL_ERROR "FFmpeg not found at ${FFMPEG_ROOT}. See windows/README.md.")
 endif()
 
+# ---------------------------------------------------------------------------
+# WebRTC media stack (libdatachannel) — the receiver's only transport. Install with:
+#   vcpkg install "libdatachannel[core,srtp,ws]:x64-windows" "libsrtp[openssl]:x64-windows" \
+#     --overlay-ports=windows/vcpkg-overlays
+#   cmake -B build -A x64 -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
+# libdatachannel delivers DTLS-SRTP + RTP; codecs stay on FFmpeg, sinks stay as-is.
+# ---------------------------------------------------------------------------
+find_package(LibDataChannel CONFIG REQUIRED)
+
 add_executable(receiver
     src/receiver.cpp
-    src/wasapi_sink.cpp      # audio -> WASAPI render endpoint (virtual mic loopback / speakers)
-    src/preview_window.cpp)  # optional GDI video preview (--preview)
+    src/webrtc_receiver.cpp   # PCAM3 signaling + DTLS-SRTP Opus/H.264 receive
+    src/video_sink.cpp        # decoded H.264 -> BGR24 -> softcam + embedded preview
+    src/wasapi_sink.cpp       # decoded Opus -> WASAPI render endpoint (virtual mic loopback)
+    src/preview_window.cpp)   # embedded GDI video preview (--preview)
 
 target_include_directories(receiver PRIVATE "${FFMPEG_ROOT}/include")
 target_link_directories(receiver PRIVATE "${FFMPEG_ROOT}/lib")
-target_link_libraries(receiver PRIVATE avformat avcodec avutil swscale swresample)
+target_link_libraries(receiver PRIVATE avcodec avutil swscale swresample LibDataChannel::LibDataChannel)
+target_compile_definitions(receiver PRIVATE HAVE_WEBRTC)
 
-# Windows system libs: WASAPI/COM (ole32), GDI preview (gdi32/user32).
+# Windows system libs: WASAPI/COM (ole32), GDI preview (gdi32/user32), Winsock (ws2_32).
 if(WIN32)
-    target_link_libraries(receiver PRIVATE ole32 gdi32 user32)
+    target_link_libraries(receiver PRIVATE ole32 gdi32 user32 ws2_32)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -42,9 +56,6 @@ option(WITH_SOFTCAM "Push decoded video into the tshino/softcam virtual camera" 
 if(WITH_SOFTCAM)
     set(SOFTCAM_ROOT "${CMAKE_SOURCE_DIR}/third_party/softcam" CACHE PATH "tshino/softcam checkout")
     set(SOFTCAM_LIB "" CACHE FILEPATH "Path to built softcamcore.lib")
-    # The static softcamcore.lib exposes the C++ sender API (softcam::sender::*) in SenderAPI.h.
-    # (The plain-C sc* wrappers live only in softcam.dll; linking the core lib keeps receiver.exe
-    # self-contained.)
     if(NOT EXISTS "${SOFTCAM_ROOT}/src/softcamcore/SenderAPI.h")
         message(FATAL_ERROR "SenderAPI.h not found under ${SOFTCAM_ROOT}/src/softcamcore")
     endif()
@@ -58,50 +69,35 @@ if(WITH_SOFTCAM)
 endif()
 
 # ---------------------------------------------------------------------------
-# WebRTC media path (libdatachannel). Release packaging enables this; OFF keeps a
-# dependency-light RTSP-only developer build available. Enable with:
-#   vcpkg install "libdatachannel[core,srtp,ws]:x64-windows" "libsrtp[openssl]:x64-windows"
-#   cmake -B build-webrtc -A x64 -DWITH_WEBRTC=ON \
-#         -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
-# libdatachannel gives us DTLS-SRTP + RTP; codecs stay on FFmpeg, sinks stay as-is.
+# WebRTC de-risk / QA test tools (dev only; not part of the shipped receiver).
+# These stand in for the phone or exercise a single layer:
+#   webrtc_loopback   in-process DTLS-SRTP media loopback
+#   webrtc_signaling  PCAM3 TCP SDP exchange + bring-up
+#   webrtc_audio      Opus RTP <-> FFmpeg codec bridge
+#   webrtc_video      H.264 RTP <-> FFmpeg codec bridge
+#   webrtc_testsender phone stand-in: PCAM3 client sending real Opus + H.264
 # ---------------------------------------------------------------------------
-option(WITH_WEBRTC "Build the WebRTC (libdatachannel) receiver path" OFF)
-if(WITH_WEBRTC)
-    find_package(LibDataChannel CONFIG REQUIRED)
-    target_sources(receiver PRIVATE src/webrtc_receiver.cpp src/video_sink.cpp)   # --webrtc receive path + H264 sink
-    target_link_libraries(receiver PRIVATE LibDataChannel::LibDataChannel ws2_32)
-    target_compile_definitions(receiver PRIVATE HAVE_WEBRTC)
-    # Phase 1 de-risk: in-process DTLS-SRTP media loopback.
+option(WITH_WEBRTC_TESTS "Build the WebRTC de-risk / QA test tools" OFF)
+if(WITH_WEBRTC_TESTS)
     add_executable(webrtc_loopback src/webrtc_loopback.cpp)
     target_link_libraries(webrtc_loopback PRIVATE LibDataChannel::LibDataChannel)
-    # Phase 1b: PCAM3 TCP signaling (SDP offer/answer over the wire) + full WebRTC bring-up.
+
     add_executable(webrtc_signaling src/webrtc_signaling.cpp)
     target_link_libraries(webrtc_signaling PRIVATE LibDataChannel::LibDataChannel ws2_32)
-    # Phase 2 codec bridge: libdatachannel RTP <-> FFmpeg Opus (encode tone -> RTP -> decode -> verify).
-    add_executable(webrtc_audio src/webrtc_audio.cpp)
-    target_include_directories(webrtc_audio PRIVATE "${FFMPEG_ROOT}/include")
-    target_link_directories(webrtc_audio PRIVATE "${FFMPEG_ROOT}/lib")
-    target_link_libraries(webrtc_audio PRIVATE LibDataChannel::LibDataChannel avcodec avutil)
-    # Phase 2b: phone stand-in — PCAM3 client that sends a real Opus tone (validates receiver.exe --webrtc).
-    add_executable(webrtc_testsender src/webrtc_testsender.cpp)
-    target_include_directories(webrtc_testsender PRIVATE "${FFMPEG_ROOT}/include")
-    target_link_directories(webrtc_testsender PRIVATE "${FFMPEG_ROOT}/lib")
-    target_link_libraries(webrtc_testsender PRIVATE LibDataChannel::LibDataChannel avcodec avutil ws2_32)
-    # Phase 5a: video codec bridge — libdatachannel H264 RTP <-> FFmpeg (encode moving box -> decode -> verify).
-    add_executable(webrtc_video src/webrtc_video.cpp)
-    target_include_directories(webrtc_video PRIVATE "${FFMPEG_ROOT}/include")
-    target_link_directories(webrtc_video PRIVATE "${FFMPEG_ROOT}/lib")
-    target_link_libraries(webrtc_video PRIVATE LibDataChannel::LibDataChannel avcodec avutil)
-    message(STATUS "WebRTC path enabled (libdatachannel)")
+
+    foreach(t webrtc_audio webrtc_video webrtc_testsender)
+        add_executable(${t} src/${t}.cpp)
+        target_include_directories(${t} PRIVATE "${FFMPEG_ROOT}/include")
+        target_link_directories(${t} PRIVATE "${FFMPEG_ROOT}/lib")
+        target_link_libraries(${t} PRIVATE LibDataChannel::LibDataChannel avcodec avutil ws2_32)
+    endforeach()
 endif()
 
 # ---------------------------------------------------------------------------
 # latbench — end-to-end acoustic latency benchmark (WASAPI only, no webrtc dep).
-# Drives the Phase-4 go/no-go gate (SRT baseline vs WebRTC). Built with the webrtc
-# tools for convenience; enable standalone with -DWITH_LATBENCH=ON.
 # ---------------------------------------------------------------------------
 option(WITH_LATBENCH "Build the latbench latency benchmark tool" OFF)
-if(WITH_LATBENCH OR WITH_WEBRTC)
+if(WITH_LATBENCH OR WITH_WEBRTC_TESTS)
     add_executable(latbench src/latbench.cpp)
     if(WIN32)
         target_link_libraries(latbench PRIVATE ole32)

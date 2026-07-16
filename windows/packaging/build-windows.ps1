@@ -59,7 +59,7 @@ foreach ($plat in 'x64','Win32') {
 Write-Host '== receiver (softcam + WebRTC enabled) =='
 $scLib = Join-Path $sc 'src\softcamcore\x64\Release\softcamcore.lib'
 $bld = Join-Path $win 'build'
-cmake -S $win -B $bld -A x64 -DWITH_SOFTCAM=ON -DWITH_WEBRTC=ON `
+cmake -S $win -B $bld -A x64 -DWITH_SOFTCAM=ON `
   "-DSOFTCAM_ROOT=$sc" "-DSOFTCAM_LIB=$scLib" `
   "-DCMAKE_TOOLCHAIN_FILE=$(Join-Path $VcpkgRoot 'scripts\buildsystems\vcpkg.cmake')"
 if ($LASTEXITCODE) { throw 'cmake configure failed' }
