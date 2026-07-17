@@ -19,6 +19,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
+import android.view.WindowManager
 import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import java.io.BufferedOutputStream
@@ -105,6 +106,7 @@ class UsbStreamer(
                 .put("v", 1)
                 .put("vcodec", if (withVideo) "h264" else "none")
                 .put("w", videoW).put("h", videoH).put("fps", videoFps)
+                .put("rotation", if (withVideo) computeVideoRotation() else 0)
                 .put("arate", AUDIO_RATE).put("achannels", 1)
                 .put("audio", if (withAudio) "pcm_s16le" else "none")
                 .toString()
@@ -238,6 +240,27 @@ class UsbStreamer(
             }
         }, h)
     }
+
+    /**
+     * Degrees (CW) the PC must rotate the frame so the webcam image is upright: the back-camera
+     * sensor mounting offset compensated by however the phone is currently held. The PC displays the
+     * decoded frame as-is, so we send it the correction. (Front camera would also need mirroring — the
+     * USB path is back-camera only for now.)
+     */
+    private fun computeVideoRotation(): Int = try {
+        val mgr = appCtx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val camId = pickBackCamera(mgr)
+        val sensor = camId?.let { mgr.getCameraCharacteristics(it).get(CameraCharacteristics.SENSOR_ORIENTATION) } ?: 90
+        val deviceDeg = when (displayRotation()) {
+            Surface.ROTATION_90 -> 90; Surface.ROTATION_180 -> 180; Surface.ROTATION_270 -> 270; else -> 0
+        }
+        (sensor - deviceDeg + 360) % 360
+    } catch (e: Exception) { Log.w(TAG, "usb: rotation calc failed", e); 0 }
+
+    private fun displayRotation(): Int = try {
+        @Suppress("DEPRECATION")
+        (appCtx.getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay?.rotation ?: Surface.ROTATION_0
+    } catch (e: Exception) { Surface.ROTATION_0 }
 
     private fun pickBackCamera(mgr: CameraManager): String? {
         return try {
