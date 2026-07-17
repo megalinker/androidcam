@@ -63,6 +63,7 @@ class UsbStreamer(
 
     // video
     private var encoder: MediaCodec? = null
+    private var encThread: HandlerThread? = null   // owns the encoder callback (must NOT be the main thread — it does socket writes)
     private var inputSurface: Surface? = null
     private var camera: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
@@ -163,6 +164,10 @@ class UsbStreamer(
                 runCatching { setInteger(MediaFormat.KEY_LOW_LATENCY, 1) }
         }
         val enc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        // The callback writes encoded frames to the socket, so it must run on a background thread —
+        // MediaCodec would otherwise dispatch it on the main looper (NetworkOnMainThreadException).
+        val et = HandlerThread("usb-enc").apply { start() }
+        encThread = et
         enc.setCallback(object : MediaCodec.Callback() {
             override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {}   // Surface input: none
             override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
@@ -184,7 +189,7 @@ class UsbStreamer(
                 Log.e(TAG, "usb: encoder error", e)
             }
             override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {}
-        })
+        }, Handler(et.looper))
         enc.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         inputSurface = enc.createInputSurface()
         enc.start()
@@ -249,6 +254,7 @@ class UsbStreamer(
         runCatching { camera?.close() }; camera = null
         runCatching { encoder?.stop() }
         runCatching { encoder?.release() }; encoder = null
+        runCatching { encThread?.quitSafely() }; encThread = null
         runCatching { inputSurface?.release() }; inputSurface = null
         runCatching { camThread?.quitSafely() }; camThread = null; camHandler = null
     }
