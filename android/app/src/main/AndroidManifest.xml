@@ -44,5 +44,14 @@
             android:exported="false"
             android:foregroundServiceType="camera|microphone" />
 
+        <!-- Lets the desktop app flip the phone's camera over adb (am broadcast) while streaming. -->
+        <receiver
+            android:name=".ControlReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.phonecam.action.SWITCH_CAMERA" />
+            </intent-filter>
+        </receiver>
+
     </application>
 </manifest>

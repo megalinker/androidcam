@@ -19,7 +19,6 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
-import android.view.WindowManager
 import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import java.io.BufferedOutputStream
@@ -70,6 +69,7 @@ class UsbStreamer(
     private var captureSession: CameraCaptureSession? = null
     private var camThread: HandlerThread? = null
     private var camHandler: Handler? = null
+    @Volatile private var useBackCamera = true   // toggled by switchCamera() (manual)
 
     // audio
     private var audioThread: Thread? = null
@@ -106,7 +106,6 @@ class UsbStreamer(
                 .put("v", 1)
                 .put("vcodec", if (withVideo) "h264" else "none")
                 .put("w", videoW).put("h", videoH).put("fps", videoFps)
-                .put("rotation", if (withVideo) computeVideoRotation() else 0)
                 .put("arate", AUDIO_RATE).put("achannels", 1)
                 .put("audio", if (withAudio) "pcm_s16le" else "none")
                 .toString()
@@ -201,11 +200,13 @@ class UsbStreamer(
 
     @SuppressLint("MissingPermission")
     private fun openCamera() {
+        if (camThread == null) {
+            val t = HandlerThread("usb-cam").apply { start() }
+            camThread = t; camHandler = Handler(t.looper)
+        }
+        val h = camHandler ?: return
         val mgr = appCtx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        val camId = pickBackCamera(mgr) ?: run { Log.e(TAG, "usb: no camera"); return }
-        val t = HandlerThread("usb-cam").apply { start() }
-        camThread = t
-        val h = Handler(t.looper); camHandler = h
+        val camId = pickCamera(mgr, useBackCamera) ?: run { Log.e(TAG, "usb: no camera"); return }
         mgr.openCamera(camId, object : CameraDevice.StateCallback() {
             override fun onOpened(device: CameraDevice) {
                 camera = device
@@ -241,34 +242,26 @@ class UsbStreamer(
         }, h)
     }
 
-    /**
-     * Degrees (CW) the PC must rotate the frame so the webcam image is upright: the back-camera
-     * sensor mounting offset compensated by however the phone is currently held. The PC displays the
-     * decoded frame as-is, so we send it the correction. (Front camera would also need mirroring — the
-     * USB path is back-camera only for now.)
-     */
-    private fun computeVideoRotation(): Int = try {
-        val mgr = appCtx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        val camId = pickBackCamera(mgr)
-        val sensor = camId?.let { mgr.getCameraCharacteristics(it).get(CameraCharacteristics.SENSOR_ORIENTATION) } ?: 90
-        val deviceDeg = when (displayRotation()) {
-            Surface.ROTATION_90 -> 90; Surface.ROTATION_180 -> 180; Surface.ROTATION_270 -> 270; else -> 0
+    /** Flip between back and front lens on the running stream (MANUAL — driven by the user's button). */
+    fun switchCamera() {
+        val h = camHandler ?: return
+        h.post {
+            if (closed.get()) return@post
+            useBackCamera = !useBackCamera
+            runCatching { captureSession?.close() }; captureSession = null
+            runCatching { camera?.close() }; camera = null
+            openCamera()   // reopens on the other lens, same encoder input surface
+            Log.i(TAG, "usb: switched to ${if (useBackCamera) "back" else "front"} camera")
         }
-        (sensor - deviceDeg + 360) % 360
-    } catch (e: Exception) { Log.w(TAG, "usb: rotation calc failed", e); 0 }
+    }
 
-    private fun displayRotation(): Int = try {
-        @Suppress("DEPRECATION")
-        (appCtx.getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay?.rotation ?: Surface.ROTATION_0
-    } catch (e: Exception) { Surface.ROTATION_0 }
-
-    private fun pickBackCamera(mgr: CameraManager): String? {
+    private fun pickCamera(mgr: CameraManager, back: Boolean): String? {
         return try {
+            val want = if (back) CameraCharacteristics.LENS_FACING_BACK else CameraCharacteristics.LENS_FACING_FRONT
             val ids = mgr.cameraIdList
-            ids.firstOrNull {
-                mgr.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) ==
-                    CameraCharacteristics.LENS_FACING_BACK
-            } ?: ids.firstOrNull()
+            ids.firstOrNull { mgr.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == want }
+                ?: ids.firstOrNull { mgr.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK }
+                ?: ids.firstOrNull()
         } catch (e: Exception) { Log.e(TAG, "usb: camera enumerate failed", e); null }
     }
 

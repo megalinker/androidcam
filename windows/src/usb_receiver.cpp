@@ -220,7 +220,6 @@ void session(SOCKET s, const UsbRecvConfig &cfg, std::atomic<bool> *running) {
             std::string meta((char *)payload.data(), payload.size());
             int arate = jsonInt(meta, "arate", 48000);
             int ach = jsonInt(meta, "achannels", 1);
-            videoSink.SetRotation(jsonInt(meta, "rotation", 0));   // upright the webcam image
             fprintf(stderr, "[usb] header: %s\n", meta.c_str());
             if (!audioStarted && meta.find("\"audio\":\"pcm") != std::string::npos) {
                 at = std::thread(audioThread, &pq, arate, ach ? ach : 1, cfg);

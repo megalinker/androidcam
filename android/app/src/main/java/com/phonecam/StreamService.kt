@@ -217,9 +217,10 @@ class StreamService : Service() {
         }
     }
 
-    /** Toggle front/back camera on the running stream (no-op in mic-only mode / USB for now). */
+    /** Toggle front/back camera on the running stream (no-op in mic-only mode). */
     private fun switchCamera() {
         webrtcSender?.switchCamera()
+        usbStreamer?.switchCamera()
     }
 
     // A partial wake lock keeps the CPU running so the stream survives the screen turning off — which

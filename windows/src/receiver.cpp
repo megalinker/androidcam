@@ -20,9 +20,13 @@
 #include <string>
 #include <atomic>
 #include <csignal>
+#include <thread>
+#include <iostream>
+#include <sstream>
 
 #include "webrtc_receiver.h"   // PCAM3 signaling + DTLS-SRTP Opus/H264 -> WASAPI + softcam
 #include "usb_receiver.h"      // scrcpy-style H.264/PCM over an adb-forwarded socket -> WASAPI + softcam
+#include "video_sink.h"        // VideoSetRotate/FlipH/FlipV — manual, live output transform
 
 static std::atomic<bool> g_running{true};
 static void on_sigint(int) { g_running = false; }
@@ -38,7 +42,23 @@ struct Options {
     std::string iceBind;              // --ice-bind: bind ICE to this local IPv4 (USB-tethering adapter)
     bool        usb = false;          // --usb: receive over an adb-forwarded socket instead of WebRTC
     int         usbPort = 0;          // --usb-port: local (adb-forwarded) TCP port to connect to
+    bool        flipH = false;        // --flip-h/--mirror: mirror the image left/right (MANUAL, never auto)
+    bool        flipV = false;        // --flip-v: flip the image top/bottom
+    int         rotate = 0;           // --rotate: 0/90/180/270 CW
 };
+
+// Live flip/rotate control: the GUI writes one command per line to our stdin as the user clicks the
+// Flip/Rotate buttons. Never automatic. Commands: "fliph 0|1", "flipv 0|1", "rotate 0|90|180|270".
+static void stdin_control_thread() {
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        std::istringstream ss(line);
+        std::string cmd; ss >> cmd;
+        if (cmd == "fliph") { int v = 0; ss >> v; VideoSetFlipH(v != 0); }
+        else if (cmd == "flipv") { int v = 0; ss >> v; VideoSetFlipV(v != 0); }
+        else if (cmd == "rotate") { int v = 0; ss >> v; VideoSetRotate(v); }
+    }
+}
 
 static Options parse_args(int argc, char **argv) {
     Options o;
@@ -55,6 +75,9 @@ static Options parse_args(int argc, char **argv) {
         else if (a == "--ice-bind" && i + 1 < argc) o.iceBind = argv[++i];
         else if (a == "--usb") o.usb = true;
         else if (a == "--usb-port" && i + 1 < argc) o.usbPort = atoi(argv[++i]);
+        else if (a == "--flip-h" || a == "--mirror") o.flipH = true;
+        else if (a == "--flip-v") o.flipV = true;
+        else if (a == "--rotate" && i + 1 < argc) o.rotate = atoi(argv[++i]);
         else if (a.rfind("--", 0) == 0) fprintf(stderr, "ignoring unknown option: %s\n", a.c_str());
     }
     return o;
@@ -63,6 +86,13 @@ static Options parse_args(int argc, char **argv) {
 int main(int argc, char **argv) {
     Options opt = parse_args(argc, argv);
     signal(SIGINT, on_sigint);
+
+    // Manual output transform (applies to both transports' video). Initial state from flags; the GUI
+    // updates it live over stdin as the user toggles Flip/Rotate. NEVER changed automatically.
+    VideoSetRotate(opt.rotate);
+    VideoSetFlipH(opt.flipH);
+    VideoSetFlipV(opt.flipV);
+    std::thread(stdin_control_thread).detach();
 
     // --usb: the scrcpy-style path over an adb-forwarded socket (no WebRTC).
     if (opt.usb) {

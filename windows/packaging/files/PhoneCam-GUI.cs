@@ -65,8 +65,9 @@ public class PhoneCamGui : Form
     }
 
     LinkLabel linkDiag;
-    CheckBox cbMic;
-    ComboBox cbBoost, cbEq;
+    CheckBox cbMic, cbFlipH, cbFlipV;
+    ComboBox cbBoost, cbEq, cbRotate;
+    Button btnSwitchCam;
     string customEq = "";        // user-defined band list ("type:f:q:db;...") from the EQ editor
     int prevEqIndex = 0;         // revert target if the custom editor is cancelled
     bool suppressEqDialog = false;   // don't pop the editor when we set the EQ index programmatically
@@ -177,6 +178,21 @@ public class PhoneCamGui : Form
         cbMic.CheckedChanged += (s, e) => { cbBoost.Enabled = cbMic.Checked; cbEq.Enabled = cbMic.Checked; };
         cbBoost.Enabled = cbMic.Checked; cbEq.Enabled = cbMic.Checked;
         Controls.Add(cbMic); Controls.Add(cbBoost); Controls.Add(cbEq);
+
+        // Manual image controls — mirror / flip / rotate the camera. NEVER automatic; the user drives
+        // them, and they apply LIVE (sent to the running receiver) as well as at the next Start.
+        cbFlipH = Check("Mirror (L/R)", 22, 280);
+        cbFlipV = Check("Flip (U/D)", 130, 280);
+        cbFlipH.CheckedChanged += (s, e) => SendRecv("fliph " + (cbFlipH.Checked ? 1 : 0));
+        cbFlipV.CheckedChanged += (s, e) => SendRecv("flipv " + (cbFlipV.Checked ? 1 : 0));
+        cbRotate = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(22, 306), Width = 110, FlatStyle = FlatStyle.Flat, BackColor = Card, ForeColor = Fg };
+        cbRotate.Items.AddRange(new object[] { "Rotate: 0°", "Rotate: 90°", "Rotate: 180°", "Rotate: 270°" });
+        cbRotate.SelectedIndex = 0;
+        cbRotate.SelectedIndexChanged += (s, e) => SendRecv("rotate " + (cbRotate.SelectedIndex * 90));
+        btnSwitchCam = new Button { Text = "Switch camera", Location = new Point(150, 305), Size = new Size(96, 24), FlatStyle = FlatStyle.Flat, BackColor = Card, ForeColor = Fg, Font = new Font("Segoe UI", 8.25f) };
+        btnSwitchCam.FlatAppearance.BorderColor = Color.FromArgb(70, 74, 82);
+        btnSwitchCam.Click += (s, e) => SwitchPhoneCamera();
+        Controls.Add(cbFlipH); Controls.Add(cbFlipV); Controls.Add(cbRotate); Controls.Add(btnSwitchCam);
 
         btnStart = new Button { Text = "Start", Location = new Point(22, 362), Size = new Size(224, 40), FlatStyle = FlatStyle.Flat, BackColor = Accent, ForeColor = Color.White, Font = new Font("Segoe UI Semibold", 11f) };
         btnStart.FlatAppearance.BorderSize = 0;
@@ -468,6 +484,32 @@ public class PhoneCamGui : Form
         catch (Exception ex) { Log("adb failed: " + ex.Message); return false; }
     }
 
+    /// <summary>Append the manual image-transform flags (mirror / flip / rotate) to a receiver arg list.</summary>
+    void AddImageFlags(List<string> a)
+    {
+        if (cbFlipH.Checked) a.Add("--flip-h");
+        if (cbFlipV.Checked) a.Add("--flip-v");
+        if (cbRotate.SelectedIndex > 0) { a.Add("--rotate"); a.Add((cbRotate.SelectedIndex * 90).ToString()); }
+    }
+
+    /// <summary>Send one live command (fliph/flipv/rotate) to the running receiver's stdin. No-op if idle.</summary>
+    void SendRecv(string cmd)
+    {
+        try { if (recv != null && !recv.HasExited && recv.StartInfo.RedirectStandardInput) recv.StandardInput.WriteLine(cmd); }
+        catch { }
+    }
+
+    /// <summary>Flip the phone's lens (front/back). Over USB it goes through adb; on pure Wi-Fi the user
+    /// taps Switch on the phone (the PC has no control channel to it).</summary>
+    void SwitchPhoneCamera()
+    {
+        string outp;
+        if (adbExe != null && AdbDevice() != null)
+            AdbRun("shell am broadcast -n com.phonecam/.ControlReceiver -a com.phonecam.action.SWITCH_CAMERA", out outp, 4000);
+        else
+            SetStatus(Amber, "To switch camera over Wi-Fi, tap Switch on the phone.");
+    }
+
     /// <summary>Serial of the single authorized USB device, or null (none / unauthorized / more than one).</summary>
     string AdbDevice()
     {
@@ -518,6 +560,7 @@ public class PhoneCamGui : Form
         lastUrl = "usb"; reconnecting = false;   // sentinel so OnTick relaunches (not stop)
         videoSeen = false; audioSeen = false; micLevel = 0f;
         var a = new List<string> { "--usb", "--usb-port", UsbPort.ToString(), "--preview", "--audio-device", "CABLE Input" };
+        AddImageFlags(a);
         int bi = cbBoost.SelectedIndex; if (bi < 0 || bi >= BoostDb.Length) bi = 2;
         if (BoostDb[bi] != 0) { a.Add("--mic-gain"); a.Add(BoostDb[bi].ToString()); }
         string eq = SelectedEq();
@@ -533,7 +576,7 @@ public class PhoneCamGui : Form
     {
         string args = BuildArgs(a);
         Log("launching receiver: " + Redact(args));
-        var psi = new ProcessStartInfo(receiverExe, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true, StandardErrorEncoding = Encoding.UTF8 };
+        var psi = new ProcessStartInfo(receiverExe, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true, RedirectStandardInput = true, StandardErrorEncoding = Encoding.UTF8 };
         recv = new Process { StartInfo = psi };
         recv.ErrorDataReceived += (s, ev) =>
         {
@@ -608,6 +651,7 @@ public class PhoneCamGui : Form
             "--audio-device", "CABLE Input"
         };
         if (iceBindIp.Length > 0) { a.Add("--ice-bind"); a.Add(iceBindIp); }   // force ICE onto USB tethering
+        AddImageFlags(a);
         int bi = cbBoost.SelectedIndex; if (bi < 0 || bi >= BoostDb.Length) bi = 2;
         if (BoostDb[bi] != 0) { a.Add("--mic-gain"); a.Add(BoostDb[bi].ToString()); }
         string eq = SelectedEq();
@@ -845,6 +889,9 @@ public class PhoneCamGui : Form
                     case "boost": { int bi; if (int.TryParse(kv[1], out bi) && bi >= 0 && bi < BoostDb.Length) cbBoost.SelectedIndex = bi; } break;
                     case "eqcustom": customEq = kv[1]; break;
                     case "eq": { int ei; if (int.TryParse(kv[1], out ei) && ei >= 0 && ei < cbEq.Items.Count) { suppressEqDialog = true; cbEq.SelectedIndex = ei; suppressEqDialog = false; prevEqIndex = ei; } } break;
+                    case "flipH": cbFlipH.Checked = kv[1] == "1"; break;
+                    case "flipV": cbFlipV.Checked = kv[1] == "1"; break;
+                    case "rotate": { int ri; if (int.TryParse(kv[1], out ri) && ri >= 0 && ri < cbRotate.Items.Count) cbRotate.SelectedIndex = ri; } break;
                     case "tray": minimizeToTray = kv[1] == "1"; break;
                     case "winpos": {
                         var xy = kv[1].Split(','); int wx, wy;
@@ -867,6 +914,9 @@ public class PhoneCamGui : Form
                 "boost=" + cbBoost.SelectedIndex,
                 "eqcustom=" + customEq,
                 "eq=" + cbEq.SelectedIndex,
+                "flipH=" + (cbFlipH.Checked ? "1" : "0"),
+                "flipV=" + (cbFlipV.Checked ? "1" : "0"),
+                "rotate=" + cbRotate.SelectedIndex,
                 "tray=" + (minimizeToTray ? "1" : "0"),
                 "autolisten=" + (autoListen ? "1" : "0"),
             };
