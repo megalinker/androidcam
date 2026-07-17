@@ -91,6 +91,9 @@ public class PhoneCamGui : Form
     string receiverExe, settingsPath, logPath;
     const string Version = "0.5.2";
     const int WebrtcSigPort = 8891;   // TCP port the PC's WebRTC PCAM3 signaling listener binds
+    const int UsbPort = 27183;        // loopback port we adb-forward to the phone's USB stream socket
+    string adbExe;                    // bundled/system adb, or null — drives the USB path
+    bool usbMode = false;             // this session pulls H.264/PCM over an adb-forwarded socket (no WebRTC)
     bool webrtcMode = false;     // this session is a WebRTC (PCAM3) signaling + DTLS-SRTP receive (mic-only)
     string webrtcSecret = "";    // the pairSecret for this WebRTC session (kept out of logs)
     string iceBindIp = "";       // set to the USB-tethering adapter IP when detected (forces media over USB)
@@ -116,6 +119,8 @@ public class PhoneCamGui : Form
         string b = AppDomain.CurrentDomain.BaseDirectory;
         string lad = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         receiverExe = FindFirst(new[] { Path.Combine(b, "bin", "receiver.exe"), Path.Combine(b, "receiver.exe"), Path.Combine(b, "..", "build", "Release", "receiver.exe") });
+        adbExe = FindFirst(new[] { Path.Combine(b, "bin", "adb", "adb.exe"), Path.Combine(b, "bin", "adb.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Android", "Sdk", "platform-tools", "adb.exe") });
         settingsPath = Path.Combine(lad, "PhoneCam", "gui.txt");
         logPath = Path.Combine(lad, "PhoneCam", "phonecam.log");
         try { Directory.CreateDirectory(Path.GetDirectoryName(logPath)); File.WriteAllText(logPath, ""); } catch { }  // fresh log per session
@@ -436,9 +441,88 @@ public class PhoneCamGui : Form
     {
         bool useMic = cbMic.Checked;
         if (!PrepareMic(ref useMic)) return;
-        manualStop = false; reconnecting = false; wentLive = false; reconnectAttempts = 0; webrtcMode = false;
-        Log("Start: WebRTC (mic=" + useMic + ")");
-        StartWebrtcPairing();
+        manualStop = false; reconnecting = false; wentLive = false; reconnectAttempts = 0;
+        webrtcMode = false; usbMode = false;
+        // Prefer the cable: if an authorized phone is on USB (adb), stream over it — no QR, no tethering.
+        string dev = (adbExe != null) ? AdbDevice() : null;
+        if (dev != null) { Log("Start: USB (adb device " + dev + ", mic=" + useMic + ")"); StartUsbPath(useMic); }
+        else { Log("Start: WebRTC (mic=" + useMic + ")"); StartWebrtcPairing(); }
+    }
+
+    /// <summary>Run bundled/system adb with `args`; returns true on exit 0. Output (stdout+stderr) in `output`.</summary>
+    bool AdbRun(string args, out string output, int timeoutMs = 8000)
+    {
+        output = "";
+        if (adbExe == null) return false;
+        try
+        {
+            var psi = new ProcessStartInfo(adbExe, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+            using (var p = Process.Start(psi))
+            {
+                string o = p.StandardOutput.ReadToEnd(), e = p.StandardError.ReadToEnd();
+                if (!p.WaitForExit(timeoutMs)) { try { p.Kill(); } catch { } return false; }
+                output = (o + e).Trim();
+                return p.ExitCode == 0;
+            }
+        }
+        catch (Exception ex) { Log("adb failed: " + ex.Message); return false; }
+    }
+
+    /// <summary>Serial of the single authorized USB device, or null (none / unauthorized / more than one).</summary>
+    string AdbDevice()
+    {
+        string outp;
+        if (!AdbRun("devices", out outp, 5000)) return null;
+        string found = null;
+        foreach (var line in outp.Split('\n'))
+        {
+            var t = line.Trim();
+            if (t.Length == 0 || t.StartsWith("List of devices")) continue;
+            var cols = t.Split('\t');
+            if (cols.Length >= 2 && cols[1].Trim() == "device")
+            {
+                if (found != null) return null;   // ambiguous — skip USB auto-select
+                found = cols[0].Trim();
+            }
+        }
+        return found;
+    }
+
+    /// <summary>USB path: forward the media port, grant perms, auto-start the phone app in USB mode over
+    /// adb, then pull H.264/PCM with receiver --usb. No QR, no tethering. Falls back to Wi-Fi on failure.</summary>
+    void StartUsbPath(bool useMic)
+    {
+        usbMode = true; webrtcMode = false;
+        string outp;
+        AdbRun("forward --remove tcp:" + UsbPort, out outp, 4000);   // clear any stale forward
+        if (!AdbRun("forward tcp:" + UsbPort + " tcp:" + UsbPort, out outp, 5000))
+        {
+            Log("adb forward failed: " + outp + " — falling back to Wi-Fi");
+            usbMode = false; StartWebrtcPairing(); return;
+        }
+        // Pre-grant so the phone's auto-start doesn't stall on a permission dialog (best-effort).
+        foreach (var perm in new[] { "android.permission.CAMERA", "android.permission.RECORD_AUDIO", "android.permission.POST_NOTIFICATIONS" })
+            AdbRun("shell pm grant com.phonecam " + perm, out outp, 4000);
+        AdbRun("shell input keyevent KEYCODE_WAKEUP", out outp, 3000);
+        // Cam+Mic when the mic is wanted, camera-only otherwise (the phone honors this mode).
+        string mode = useMic ? "BOTH" : "CAMERA_ONLY";
+        if (!AdbRun("shell am start -n com.phonecam/.MainActivity -a com.phonecam.action.USB --ei usbPort " + UsbPort + " --es mode " + mode, out outp, 6000))
+            Log("adb am start returned: " + outp);   // continue anyway; receiver --usb retries the connection
+        SetStatus(Amber, "USB — starting the phone over the cable…");
+        StartUsbReceiver(useMic);
+    }
+
+    /// <summary>Launch (or relaunch, for auto-reconnect) receiver.exe in --usb mode.</summary>
+    void StartUsbReceiver(bool useMic)
+    {
+        lastUrl = "usb"; reconnecting = false;   // sentinel so OnTick relaunches (not stop)
+        videoSeen = false; audioSeen = false; micLevel = 0f;
+        var a = new List<string> { "--usb", "--usb-port", UsbPort.ToString(), "--preview", "--audio-device", "CABLE Input" };
+        int bi = cbBoost.SelectedIndex; if (bi < 0 || bi >= BoostDb.Length) bi = 2;
+        if (BoostDb[bi] != 0) { a.Add("--mic-gain"); a.Add(BoostDb[bi].ToString()); }
+        string eq = SelectedEq();
+        if (eq.Length > 0) { a.Add("--eq"); a.Add(eq); }
+        RunReceiverProcess(a, useMic);
     }
 
 
@@ -641,7 +725,7 @@ public class PhoneCamGui : Form
             }
             reconnectAttempts++;
             SetStatus(Amber, "Reconnecting… (" + reconnectAttempts + ")");
-            StartWebrtcReceiver();
+            if (usbMode) StartUsbReceiver(cbMic.Checked); else StartWebrtcReceiver();
             return;
         }
 
@@ -708,6 +792,8 @@ public class PhoneCamGui : Form
         }
         else if (webrtcMode)
             SetStatus(Amber, "Waiting for the phone to connect…");
+        else if (usbMode)
+            SetStatus(Amber, "USB — waiting for the phone…");
     }
 
     /// <summary>Mask the session secret before anything reaches the log.</summary>
@@ -722,6 +808,8 @@ public class PhoneCamGui : Form
         if (running) Log("stopped");
         timer.Stop();
         reconnecting = false;
+        if (usbMode) { string o; AdbRun("forward --remove tcp:" + UsbPort, out o, 4000); }
+        usbMode = false;
         webrtcMode = false;
         embedded = IntPtr.Zero;
         micLevel = 0f;

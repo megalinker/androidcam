@@ -27,6 +27,7 @@ find_package(LibDataChannel CONFIG REQUIRED)
 add_executable(receiver
     src/receiver.cpp
     src/webrtc_receiver.cpp   # PCAM3 signaling + DTLS-SRTP Opus/H.264 receive
+    src/usb_receiver.cpp      # scrcpy-style H.264/PCM over an adb-forwarded socket (--usb)
     src/video_sink.cpp        # decoded H.264 -> BGR24 -> softcam + embedded preview
     src/wasapi_sink.cpp       # decoded Opus -> WASAPI render endpoint (virtual mic loopback)
     src/preview_window.cpp)   # embedded GDI video preview (--preview)

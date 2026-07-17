@@ -42,10 +42,15 @@ class StreamService : Service() {
         const val ACTION_SWITCH_CAMERA = "com.phonecam.action.SWITCH_CAMERA"
         const val EXTRA_MODE = "mode"
         const val EXTRA_QUALITY = "quality"
+        // Transport: "webrtc" (default, Wi-Fi) or "usb" (scrcpy-style H.264/PCM over an adb-forwarded socket).
+        const val EXTRA_TRANSPORT = "transport"
         // WebRTC signaling target (from the PC's PCAM3 QR).
         const val EXTRA_SIG_HOST = "sigHost"
         const val EXTRA_SIG_PORT = "sigPort"
         const val EXTRA_SIG_SECRET = "sigSecret"
+        // USB: the loopback port the phone listens on; the PC reaches it via `adb forward`.
+        const val EXTRA_USB_PORT = "usbPort"
+        const val DEFAULT_USB_PORT = 27183
 
         // Auto-stop after this long with no PC connected — the camera/mic run whether or not anyone
         // is watching, so a stream left on with no peer is pure battery waste. Generous enough not to
@@ -80,6 +85,7 @@ class StreamService : Service() {
     }
 
     private var webrtcSender: WebRtcSender? = null
+    private var usbStreamer: UsbStreamer? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
     // Battery guard: auto-stop if no PC connects for IDLE_TIMEOUT_MS. lastClientMs = the last time the
@@ -111,13 +117,53 @@ class StreamService : Service() {
             ?: Mode.BOTH
         val quality = intent?.getStringExtra(EXTRA_QUALITY)?.let { runCatching { Quality.valueOf(it) }.getOrNull() }
             ?: DEFAULT_QUALITY
-        val sigHost = intent?.getStringExtra(EXTRA_SIG_HOST)
-        val sigPort = intent?.getIntExtra(EXTRA_SIG_PORT, 0) ?: 0
-        val sigSecret = intent?.getStringExtra(EXTRA_SIG_SECRET)
+        val transport = intent?.getStringExtra(EXTRA_TRANSPORT) ?: "webrtc"
 
         startForegroundForMode(mode)
-        startStreaming(mode, quality, sigHost, sigPort, sigSecret)
+        if (transport == "usb") {
+            val usbPort = intent?.getIntExtra(EXTRA_USB_PORT, DEFAULT_USB_PORT) ?: DEFAULT_USB_PORT
+            startUsbStreaming(mode, quality, usbPort)
+        } else {
+            val sigHost = intent?.getStringExtra(EXTRA_SIG_HOST)
+            val sigPort = intent?.getIntExtra(EXTRA_SIG_PORT, 0) ?: 0
+            val sigSecret = intent?.getStringExtra(EXTRA_SIG_SECRET)
+            startStreaming(mode, quality, sigHost, sigPort, sigSecret)
+        }
         return START_STICKY
+    }
+
+    /**
+     * USB transport: the phone listens on a loopback port and streams H.264 + PCM over it; the PC
+     * reaches it through `adb forward` (no WebRTC, no tethering). "connected" comes from the socket
+     * accept. All the media work is in [UsbStreamer].
+     */
+    private fun startUsbStreaming(mode: Mode, quality: Quality, port: Int) {
+        if (isRunning) return
+        clientConnected = false; everConnected = false
+        try {
+            val streamer = UsbStreamer(applicationContext, port,
+                mode != Mode.MIC_ONLY, mode != Mode.CAMERA_ONLY, quality.w, quality.h, quality.fps) { connected ->
+                clientConnected = connected
+                if (connected) everConnected = true
+                lastClientMs = SystemClock.elapsedRealtime()
+            }
+            usbStreamer = streamer
+            streamer.start()
+            streamUrl = "USB (adb :$port)"
+            isRunning = true
+            acquireWakeLock()
+            lastClientMs = SystemClock.elapsedRealtime()
+            idleHandler.postDelayed(idleCheck, IDLE_CHECK_MS)
+            Log.i(TAG, "usb streamer up ($mode, ${quality.label}) on 127.0.0.1:$port")
+            updateNotification()
+        } catch (e: Exception) {
+            Log.e(TAG, "startUsbStreaming failed", e)
+            releaseWakeLock()
+            runCatching { usbStreamer?.stop() }
+            usbStreamer = null
+            isRunning = false
+            stopSelf()
+        }
     }
 
     /**
@@ -171,7 +217,7 @@ class StreamService : Service() {
         }
     }
 
-    /** Toggle front/back camera on the running stream (no-op in mic-only mode). */
+    /** Toggle front/back camera on the running stream (no-op in mic-only mode / USB for now). */
     private fun switchCamera() {
         webrtcSender?.switchCamera()
     }
@@ -196,7 +242,9 @@ class StreamService : Service() {
         idleHandler.removeCallbacks(idleCheck)
         releaseWakeLock()
         runCatching { webrtcSender?.stop() }
+        runCatching { usbStreamer?.stop() }
         webrtcSender = null
+        usbStreamer = null
         isRunning = false
         streamUrl = null
         clientConnected = false; everConnected = false
