@@ -14,6 +14,8 @@ Camera → H.264 ─┴─ WebRTC / DTLS-SRTP ────────→┴→ 
 
 The phone's mode (mic / camera / both) decides which tracks it sends; the low-latency WebRTC path carries whatever it offers. Pairing is local and QR-bootstrapped — no cloud signaling, STUN, or TURN service is used.
 
+**Over USB** (with USB debugging on) PhoneCam takes a separate, even steadier path: a scrcpy-style stream — the phone encodes H.264 + PCM and sends it over an `adb forward` socket straight into the same FFmpeg → softcam / WASAPI sinks. The PC auto-detects the phone, starts it, and connects with no QR and no tethering; Wi-Fi/WebRTC is the fallback when no cable is present.
+
 ## The two Windows sinks (why the mic is the hard part)
 
 | Sink | Windows mechanism | Code signing | Difficulty |

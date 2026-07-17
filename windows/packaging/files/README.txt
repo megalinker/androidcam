@@ -27,11 +27,18 @@ RECONNECTING
   app to begin listening.
 
 USB (lowest latency, optional)
-  For the steadiest, lowest-latency link, enable USB tethering on the phone
-  (Settings > Network & internet > Hotspot & tethering > USB tethering) with the
-  cable plugged in. PhoneCam on the PC detects it automatically and routes media
-  over the cable instead of Wi-Fi - just scan the QR as usual. Unplug or turn
-  tethering off to go back to Wi-Fi.
+  For the steadiest, lowest-latency link, use the cable. Two ways, both auto-detected
+  by PhoneCam on the PC (no QR scan needed):
+
+  1. Recommended - USB debugging. On the phone, enable Developer options, then turn on
+     "USB debugging" and plug in. Tap "Allow" if prompted. Press Start on the PC: it
+     finds the phone, starts it, and streams H.264 + mic straight over the cable. No
+     tethering, no scan.
+  2. USB tethering. If you'd rather not enable USB debugging, turn on USB tethering
+     (Settings > Network & internet > Hotspot & tethering > USB tethering) with the
+     cable in; PhoneCam routes the encrypted WebRTC media over the cable instead of Wi-Fi.
+
+  Unplug to go back to Wi-Fi.
 
 TROUBLESHOOTING
   - A full-tunnel VPN can hide LAN devices. Disable it or enable Allow LAN traffic
