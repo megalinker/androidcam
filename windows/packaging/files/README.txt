@@ -1,5 +1,5 @@
 ========================================================================
- PhoneCam 0.5.2 - Android camera and low-latency microphone for Windows
+ PhoneCam 0.5.3 - Android camera and low-latency microphone for Windows
 ========================================================================
 
 WHAT YOU NEED
