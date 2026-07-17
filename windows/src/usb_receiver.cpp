@@ -58,6 +58,61 @@ struct PcmQueue {
     }
 };
 
+// ---- video: a queue of Annex-B payloads drained by one decode thread ----
+struct VideoQueue {
+    std::deque<std::vector<uint8_t>> q;
+    std::mutex m;
+    std::condition_variable cv;
+    bool done = false;
+    static constexpr size_t kMax = 120;   // ~4s @30fps — bound memory; a real backlog means decode can't keep up
+
+    void push(const uint8_t *p, int n) {
+        std::lock_guard<std::mutex> lk(m);
+        if (q.size() >= kMax) q.pop_front();   // last-resort: shed oldest rather than grow unbounded
+        q.emplace_back(p, p + n);
+        cv.notify_one();
+    }
+    bool pop(std::vector<uint8_t> &out) {
+        std::unique_lock<std::mutex> lk(m);
+        cv.wait(lk, [&] { return done || !q.empty(); });
+        if (q.empty()) return false;
+        out = std::move(q.front());
+        q.pop_front();
+        return true;
+    }
+    void finish() {
+        std::lock_guard<std::mutex> lk(m);
+        done = true;
+        cv.notify_all();
+    }
+};
+
+void videoThread(VideoQueue *vq, VideoSink *sink) {
+    const AVCodec *decv = avcodec_find_decoder(AV_CODEC_ID_H264);
+    AVCodecContext *ctx = avcodec_alloc_context3(decv);
+    ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    if (avcodec_open2(ctx, decv, nullptr) < 0) { fprintf(stderr, "[usb] h264 decoder open failed\n"); return; }
+    std::vector<uint8_t> buf;
+    long vframes = 0;
+    while (vq->pop(buf)) {
+        AVPacket *pk = av_packet_alloc();
+        if (av_new_packet(pk, (int)buf.size()) == 0) {
+            memcpy(pk->data, buf.data(), buf.size());
+            if (avcodec_send_packet(ctx, pk) == 0) {
+                AVFrame *fr = av_frame_alloc();
+                while (avcodec_receive_frame(ctx, fr) == 0) {
+                    sink->WriteFrame(fr);
+                    av_frame_unref(fr);
+                    if ((++vframes % 150) == 0) fprintf(stderr, "[usb] %ld video frames\n", vframes);
+                }
+                av_frame_free(&fr);
+            }
+        }
+        av_packet_free(&pk);
+    }
+    avcodec_free_context(&ctx);
+}
+
 void audioThread(PcmQueue *pq, int rate, int channels, const UsbRecvConfig cfg) {
     WasapiSink sink;
     AVCodecContext *fmt = avcodec_alloc_context3(nullptr);   // just carries the source PCM format
@@ -140,21 +195,18 @@ SOCKET connectLoop(int port, std::atomic<bool> *running) {
     return INVALID_SOCKET;
 }
 
-// One connected session: read frames until EOF/stop. Returns when the socket ends.
+// One connected session: read frames until EOF/stop. The receive thread does I/O only and hands
+// video off to a decode thread and audio to a render thread, so neither can starve the socket reads.
 void session(SOCKET s, const UsbRecvConfig &cfg, std::atomic<bool> *running) {
-    const AVCodec *decv = avcodec_find_decoder(AV_CODEC_ID_H264);
-    AVCodecContext *decCtxV = avcodec_alloc_context3(decv);
-    decCtxV->flags |= AV_CODEC_FLAG_LOW_DELAY;
-    if (avcodec_open2(decCtxV, decv, nullptr) < 0) { fprintf(stderr, "[usb] h264 decoder open failed\n"); return; }
     VideoSink videoSink(30.0, cfg.wantPreview);
-
+    VideoQueue vq;
     PcmQueue pq;
+    std::thread vt(videoThread, &vq, &videoSink);
     std::thread at;
     bool audioStarted = false;
 
     uint8_t hdr[13];
     std::vector<uint8_t> payload;
-    long vframes = 0;
     while (running->load()) {
         if (!readFull(s, hdr, 13, running)) break;
         char type = (char)hdr[0];
@@ -174,29 +226,17 @@ void session(SOCKET s, const UsbRecvConfig &cfg, std::atomic<bool> *running) {
                 audioStarted = true;
             }
         } else if (type == 'V') {
-            AVPacket *pk = av_packet_alloc();
-            if (av_new_packet(pk, len) == 0) {
-                memcpy(pk->data, payload.data(), len);
-                if (avcodec_send_packet(decCtxV, pk) == 0) {
-                    AVFrame *fr = av_frame_alloc();
-                    while (avcodec_receive_frame(decCtxV, fr) == 0) {
-                        videoSink.WriteFrame(fr);
-                        av_frame_unref(fr);
-                        if ((++vframes % 150) == 0) fprintf(stderr, "[usb] %ld video frames\n", vframes);
-                    }
-                    av_frame_free(&fr);
-                }
-            }
-            av_packet_free(&pk);
+            vq.push(payload.data(), len);
         } else if (type == 'A') {
             pq.push(payload.data(), len);
         }
     }
 
-    videoSink.Stop();
+    vq.finish();
+    if (vt.joinable()) vt.join();
     pq.finish();
     if (at.joinable()) at.join();
-    avcodec_free_context(&decCtxV);
+    videoSink.Stop();
 }
 
 }  // namespace
