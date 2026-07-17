@@ -35,7 +35,14 @@ WizardStyle=modern
 Source: "{#Payload}\PhoneCam.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Payload}\README.txt";   DestDir: "{app}"; Flags: isreadme ignoreversion
 Source: "{#Payload}\PhoneCam.apk";  DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Payload}\bin\*";         DestDir: "{app}\bin"; Flags: recursesubdirs ignoreversion
+Source: "{#Payload}\bin\*";         DestDir: "{app}\bin"; Excludes: "softcam\*"; Flags: recursesubdirs ignoreversion
+; softcam.dll (the virtual-camera DirectShow filter) is loaded and LOCKED by any app that has
+; enumerated webcams — Chrome, Edge, Discord, Teams, etc. Replacing it on every update makes the
+; installer's Restart Manager prompt to close those apps. It's functionally stable, so install it
+; ONLY when missing: updates then never touch the locked file and the prompt goes away. (regsvr32
+; still runs each install, so registration stays current.) Bump deliberately if it ever must change.
+Source: "{#Payload}\bin\softcam\x64\softcam.dll";   DestDir: "{app}\bin\softcam\x64";   Flags: onlyifdoesntexist
+Source: "{#Payload}\bin\softcam\Win32\softcam.dll"; DestDir: "{app}\bin\softcam\Win32"; Flags: onlyifdoesntexist
 Source: "{#Payload}\redist\*";      DestDir: "{tmp}\redist"; Flags: deleteafterinstall
 
 [Icons]
