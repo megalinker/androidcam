@@ -30,14 +30,14 @@ Legend: **Sev** = corrected severity · **Conf** = confidence · **T** = transpo
 | F-20 Android ABI filter (arm-only, ~half APK) | ✅ applied | Gradle |
 | F-22 preview double-buffer (drop redundant copy) | ✅ applied | MSBuild |
 | F-28 GUI MoveWindow size-guard | ✅ applied | csc |
-| F-11 event-driven WASAPI (opt-in `PHONECAM_LOWLATENCY_AUDIO`) | ✅ applied | MSBuild |
+| ~~F-11 event-driven WASAPI~~ | ❌ **applied then REMOVED** — measured no-win (25→28.8 ms; audio already at the floor), not worth the added complexity | — |
 | F-12 raw-mic / no-AEC (opt-in GUI checkbox → `--ez rawMic`) | ✅ applied | Gradle + csc |
 | F-34 idle skip when no camera consumer (softcam `IsConnected` + preview-visible signal) | ✅ applied | MSBuild (no-softcam path); softcam `#ifdef` line inspection-verified |
 | Instrumentation (`stats.h`, `PHONECAM_STATS`) | ✅ applied | MSBuild + on-hardware |
 | F-05 / F-06 decode threading | ❌ **rejected by measurement**, reverted | — |
 
 **Opt-in env/UI flags now available:** `PHONECAM_STATS=1` (instrumentation), `PHONECAM_DRIFT=1` (audio drift
-comp, F-03), `PHONECAM_LOWLATENCY_AUDIO=1` (event-driven audio, F-11); GUI "Raw mic (no AEC)" checkbox (F-12).
+comp, F-03); GUI "Raw mic (no AEC)" checkbox (F-12). (F-11's `PHONECAM_LOWLATENCY_AUDIO` was removed — measured no-win.)
 
 _Declined per the brief's "no speculative micro-changes" rule (unmeasurable gain vs regression risk):_
 _F-23 (meter subsample), F-24 (buffer pooling), F-29 (LTO — FFmpeg is in DLLs), F-31 (CV disconnect wake)._

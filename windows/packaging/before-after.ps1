@@ -5,8 +5,8 @@
 
   Examples (from windows/packaging):
     .\before-after.ps1 -Label baseline
-    .\before-after.ps1 -Label lowlat  -LowLatencyAudio     # F-11 A/B (compare AudioWasapiMeanMs)
     .\before-after.ps1 -Label drift   -Drift -Seconds 600  # F-03 A/B (watch AudioWasapiMeanMs trend/drops)
+    .\before-after.ps1 -Label rawmic  -RawMic              # F-12 (then listen to CABLE Output)
 
   Needs: a phone on adb (USB debugging) with PhoneCam installed, and a receiver built with the
   instrumentation (this branch). A hard receiver kill can wedge the phone streamer, so each run
@@ -16,7 +16,6 @@ param(
   [string]$Label = "run",
   [int]$Seconds = 60,
   [switch]$Drift,             # PHONECAM_DRIFT (F-03 audio drift compensation)
-  [switch]$LowLatencyAudio,   # PHONECAM_LOWLATENCY_AUDIO (F-11 event-driven audio)
   [switch]$RawMic,            # F-12: launch the phone with --ez rawMic true
   [string]$Receiver = (Join-Path $PSScriptRoot '..\build-webrtc\Release\receiver.exe'),
   [string]$Adb = (Join-Path $PSScriptRoot '..\..\dist\PhoneCam\bin\adb\adb.exe')
@@ -35,7 +34,6 @@ Start-Sleep -Seconds 4
 
 $env:PHONECAM_STATS = "1"
 if ($Drift) { $env:PHONECAM_DRIFT = "1" } else { Remove-Item Env:\PHONECAM_DRIFT -ErrorAction SilentlyContinue }
-if ($LowLatencyAudio) { $env:PHONECAM_LOWLATENCY_AUDIO = "1" } else { Remove-Item Env:\PHONECAM_LOWLATENCY_AUDIO -ErrorAction SilentlyContinue }
 
 $log = Join-Path $env:TEMP ("ba_" + $Label + ".log")
 $p = Start-Process $Receiver -ArgumentList "--usb","--usb-port","27183" -NoNewWindow -PassThru `
@@ -57,7 +55,7 @@ foreach ($l in $lines) {
 [pscustomobject]@{
   Label             = $Label
   Seconds           = $Seconds
-  Flags             = (@(if($Drift){'DRIFT'}; if($LowLatencyAudio){'LOWLAT'}; if($RawMic){'RAWMIC'}) -join ',')
+  Flags             = (@(if($Drift){'DRIFT'}; if($RawMic){'RAWMIC'}) -join ',')
   Reconnects        = ($lines | Select-String 'h264 decode:').Count
   DecodeP50ms       = (Med $dec)
   SinkP50ms         = (Med $sink)

@@ -18,7 +18,7 @@ not a big latency drop.**
 | Metric | Before | After | Verdict | How |
 |---|---|---|---|---|
 | **H.264 decode latency** | 1.8 ms (single-threaded) | 1.8 ms | **F-05 rejected** — frame-threading never active (FFmpeg defaults `thread_count=1`) | `video.decode` A/B `frame`/`slice` |
-| **Audio standing latency** | 25 ms | 28.8 ms | **F-11 no win** — audio path was already at the floor; the 200 ms buffer was a ceiling, not standing latency | `-LowLatencyAudio` A/B, 60 s |
+| **Audio standing latency** | 25 ms | 28.8 ms | **F-11 no win → REMOVED** — audio path was already at the floor; the 200 ms buffer was a ceiling, not standing latency, so the event-driven mode was reverted rather than shipped as dead opt-in code | one-time `-LowLatencyAudio` A/B, 60 s |
 | **video.sink (convert+push)** | 1.66 ms | 1.69 ms | unchanged — convert is cheap; F-22 removed a *preview* copy, not a sink copy | `video.sink` p50 |
 | **Queue drops** | 0 | 0 | no backlog either way | `audio.queue`/`video.queue` |
 

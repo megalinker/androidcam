@@ -39,14 +39,6 @@ bool driftEnabled() {
     return v == 1;
 }
 
-// F-11 opt-in low-latency audio: event-driven WASAPI (WaitForSingleObject instead of Sleep(2) polling)
-// with a small buffer. Off by default so the shipped 200ms/polling behavior stays predictable.
-bool lowLatencyAudioEnabled() {
-    static int v = -1;
-    if (v < 0) { const char* e = std::getenv("PHONECAM_LOWLATENCY_AUDIO"); v = (e && e[0] && e[0] != '0') ? 1 : 0; }
-    return v == 1;
-}
-
 // Wide friendly name -> narrow, for logging + matching.
 std::string toNarrow(const wchar_t* w) {
     if (!w) return {};
@@ -196,8 +188,6 @@ struct WasapiSink::Impl {
     float levelPeak = 0.0f;    // running peak of the outgoing signal, for the GUI's mic meter
     DWORD levelLastMs = 0;     // last time we emitted a [level] line (throttled to ~10 Hz)
     bool driftOk = true;       // F-03: cleared if swr_set_compensation is unsupported, to stop retrying
-    bool eventMode = false;    // F-11: event-driven render (vs Sleep(2) polling)
-    HANDLE hEvent = nullptr;   // F-11: WASAPI buffer-ready event when eventMode
 };
 
 WasapiSink::WasapiSink() : p_(new Impl) {}
@@ -271,33 +261,10 @@ bool WasapiSink::Init(const AVCodecContext* dec, const std::string& deviceMatch,
     av_channel_layout_default(&s.outLayout, s.outChannels);
     s.eq = buildEq(eqPreset, (float)s.outRate);   // voice EQ cascade (empty = off)
 
-    // Default: a 200 ms shared-mode buffer drained by polling. Opt-in low-latency mode (F-11): event-
-    // driven with a 30 ms buffer, so the render loop waits on the engine event instead of Sleep(2) and
-    // the standing latency ceiling is far lower. Falls back to the default on any event-init failure.
-    if (lowLatencyAudioEnabled()) {
-        HRESULT ehr = s.client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                                           300000 /*30ms*/, 0, s.mix, nullptr);
-        if (SUCCEEDED(ehr)) {
-            s.hEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-            if (s.hEvent && SUCCEEDED(s.client->SetEventHandle(s.hEvent))) {
-                s.eventMode = true;
-                fprintf(stderr, "[audio] low-latency mode: event-driven, 30ms buffer\n");
-            }
-        }
-        if (!s.eventMode) {
-            fprintf(stderr, "[audio] low-latency (event) init unavailable — using default 200ms polling\n");
-            (void)ehr;
-            if (s.hEvent) { CloseHandle(s.hEvent); s.hEvent = nullptr; }
-            // Initialize can only be called once per IAudioClient, so get a fresh one for the fallback.
-            s.client->Release(); s.client = nullptr;
-            if (FAILED(s.device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&s.client))) return false;
-        }
-    }
-    if (!s.eventMode) {
-        const REFERENCE_TIME kBufDuration = 2000000; // 200 ms (100-ns units)
-        hr = s.client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, kBufDuration, 0, s.mix, nullptr);
-        if (FAILED(hr)) { fprintf(stderr, "[audio] IAudioClient::Initialize 0x%08lx\n", hr); return false; }
-    }
+    // 200 ms shared-mode buffer.
+    const REFERENCE_TIME kBufDuration = 2000000; // 100-ns units
+    hr = s.client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, kBufDuration, 0, s.mix, nullptr);
+    if (FAILED(hr)) { fprintf(stderr, "[audio] IAudioClient::Initialize 0x%08lx\n", hr); return false; }
 
     hr = s.client->GetBufferSize(&s.bufferFrames);
     if (FAILED(hr)) return false;
@@ -425,7 +392,7 @@ bool WasapiSink::WriteFrame(const AVFrame* frame) {
         UINT32 padding = 0;
         if (FAILED(s.client->GetCurrentPadding(&padding))) return false;
         UINT32 avail = s.bufferFrames - padding;
-        if (avail == 0) { if (s.eventMode) WaitForSingleObject(s.hEvent, 100); else Sleep(2); continue; }   // F-11
+        if (avail == 0) { Sleep(2); continue; }
         UINT32 chunk = std::min<UINT32>(avail, (UINT32)(got - written));
         BYTE* dst = nullptr;
         if (FAILED(s.render->GetBuffer(chunk, &dst))) return false;
@@ -444,7 +411,6 @@ void WasapiSink::Stop() {
     if (!p_) return;
     Impl& s = *p_;
     if (s.client && s.started) { s.client->Stop(); s.started = false; }
-    if (s.hEvent) { CloseHandle(s.hEvent); s.hEvent = nullptr; }   // F-11
     av_freep(&s.buf); s.bufSamples = 0;
     if (s.swr) { swr_free(&s.swr); }
     av_channel_layout_uninit(&s.outLayout);
