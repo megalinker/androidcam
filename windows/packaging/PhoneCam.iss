@@ -27,6 +27,12 @@ PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
+; Don't run the Restart Manager "close these apps" scan. It flags every file whose destination
+; already EXISTS (not just ones being replaced), so it caught softcam.dll — which Chrome/Discord/
+; Teams lock — and prompted to close them, even though softcam.dll is now skipped on update
+; (onlyifdoesntexist). Our own exes are force-closed in PrepareToInstall and nothing else being
+; replaced is locked, so disabling this is safe and removes the prompt.
+CloseApplications=no
 
 [Files]
 ; ignoreversion is essential: PhoneCam.exe (csc, no version resource) and receiver.exe otherwise
