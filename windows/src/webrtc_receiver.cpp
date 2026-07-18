@@ -14,6 +14,8 @@
 #include "webrtc_receiver.h"
 #include "wasapi_sink.h"
 #include "video_sink.h"   // Phase 5: H.264 -> softcam virtual camera
+#include "stats.h"        // flag-gated (PHONECAM_STATS) latency/queue instrumentation
+#include "pro_audio.h"    // MMCSS "Pro Audio" for the render thread (F-09)
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -101,8 +103,10 @@ struct FrameQueue {
         std::unique_lock<std::mutex> lk(m);
         if (q.size() > 100) {                 // ~2s @ 20ms; drop oldest rather than build latency
             AVFrame *old = q.front(); q.pop_front(); av_frame_free(&old);
+            stats::g_audioQ.drop();
         }
         q.push_back(f);
+        stats::g_audioQ.observe((long)q.size());
         lk.unlock();
         cv.notify_one();
     }
@@ -120,6 +124,7 @@ struct FrameQueue {
 
 // Owns COM + the WasapiSink. Inits the sink from the first frame's format, then renders.
 static void audioThread(FrameQueue *fq, AVCodecContext *sinkFmt, WebrtcRecvConfig cfg) {
+    ProAudioThread proAudio;   // MMCSS "Pro Audio" scheduling for the real-time render thread (F-09)
     WasapiSink sink;
     bool ready = false;
     for (;;) {
@@ -175,10 +180,14 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
     AVCodecContext *decCtxV = nullptr;
     VideoSink       videoSink(30.0, cfg.wantPreview);
     std::shared_ptr<rtc::Track> vtrack;
+    uint64_t        lastPliUs = 0;   // F-08: rate-limit keyframe requests on decode error
     // libdatachannel dispatches track callbacks from a thread pool, so audio onMessage and video
-    // onFrame (and successive video frames) can run concurrently. Serialize all decode: the FFmpeg
-    // decoders and the VideoSink buffer are not thread-safe (real-phone streams corrupt the heap).
-    std::mutex decodeMutex;
+    // onFrame (and successive frames of each) can run concurrently. The Opus and H.264 decoders use
+    // independent AVCodecContexts and independent sinks, so they only need to be serialized against
+    // THEMSELVES, not against each other — one lock per decoder lets audio decode while a video frame
+    // is being decoded+converted (each callback takes only its own lock, so no deadlock). See F-07.
+    std::mutex audioDecodeMutex;
+    std::mutex videoDecodeMutex;
 
     pc->onStateChange([&disconnected, &vtrack](rtc::PeerConnection::State s) {
         using S = rtc::PeerConnection::State;
@@ -214,7 +223,7 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
         int off = rtpPayloadOffset(p, (int)b.size());
         if (off < 0 || off >= (int)b.size()) return;
         if (++rtpCount == 1) fprintf(stderr, "[webrtc] first RTP received\n");
-        std::lock_guard<std::mutex> lk(decodeMutex);
+        std::lock_guard<std::mutex> lk(audioDecodeMutex);
         AVPacket *pk = av_packet_alloc();
         pk->data = const_cast<uint8_t *>(p + off);
         pk->size = (int)b.size() - off;
@@ -227,7 +236,9 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
                     sinkFmt->sample_fmt = (AVSampleFormat)fr->format;
                     sinkFmtReady = true;               // publishes sinkFmt before the frame is enqueued
                 }
-                fq.push(av_frame_clone(fr));
+                AVFrame *clone = av_frame_clone(fr);
+                if (stats::enabled()) clone->pts = (int64_t)stats::nowUs();   // arrival stamp for audio.e2e
+                fq.push(clone);
                 av_frame_unref(fr);
             }
             av_frame_free(&fr);
@@ -239,6 +250,8 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
     if (cfg.wantVideo) {
         const AVCodec *decv = avcodec_find_decoder(AV_CODEC_ID_H264);
         decCtxV = avcodec_alloc_context3(decv);
+        // Single-threaded by default (FFmpeg leaves thread_count=1). The F-05 frame-threading-latency
+        // hypothesis was disproven by measurement, so no thread config is set here. See docs/perf-audit F-05.
         avcodec_open2(decCtxV, decv, nullptr);
         rtc::Description::Video vmedia("video", rtc::Description::Direction::RecvOnly);
         vmedia.addH264Codec(96);
@@ -248,13 +261,27 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
         depack->addToChain(std::make_shared<rtc::RtcpReceivingSession>());
         vtrack->setMediaHandler(depack);
         vtrack->onFrame([&, decCtxV](rtc::binary data, rtc::FrameInfo) {
-            std::lock_guard<std::mutex> lk(decodeMutex);
+            std::lock_guard<std::mutex> lk(videoDecodeMutex);
             AVPacket *pk = av_packet_alloc();
             if (av_new_packet(pk, (int)data.size()) == 0) {
                 std::memcpy(pk->data, data.data(), data.size());
+                if (stats::enabled()) pk->pts = (int64_t)stats::nowUs();   // decode submit->output pairing
                 if (avcodec_send_packet(decCtxV, pk) == 0) {
                     AVFrame *fr = av_frame_alloc();
-                    while (avcodec_receive_frame(decCtxV, fr) == 0) { videoSink.WriteFrame(fr); av_frame_unref(fr); }
+                    while (avcodec_receive_frame(decCtxV, fr) == 0) {
+                        if (stats::enabled() && fr->pts != AV_NOPTS_VALUE)
+                            stats::g_decodeLat.add((double)((int64_t)stats::nowUs() - fr->pts));
+                        // Speed up recovery after packet loss: if the decoder output a frame with a
+                        // broken reference chain, ask the phone for a fresh IDR now instead of waiting a
+                        // whole GOP. Rate-limited to >=400ms so a loss burst can't cause a keyframe
+                        // storm (which would spike bitrate). (F-08)
+                        if ((fr->decode_error_flags &
+                             (FF_DECODE_ERROR_INVALID_BITSTREAM | FF_DECODE_ERROR_MISSING_REFERENCE)) && vtrack) {
+                            uint64_t now = stats::nowUs();
+                            if (now - lastPliUs > 400000) { lastPliUs = now; try { vtrack->requestKeyframe(); } catch (...) {} }
+                        }
+                        videoSink.WriteFrame(fr); av_frame_unref(fr);
+                    }
                     av_frame_free(&fr);
                 }
             }
@@ -265,16 +292,21 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
 
     pc->setLocalDescription();                          // -> gather -> onGatheringStateChange sends 'O'
 
-    // Wait for the phone's answer (blocking; it replies promptly after the offer).
+    // Wait for the phone's answer (recv is bounded by the F-01 SO_RCVTIMEO, so a silent peer can't
+    // block here forever).
+    bool negotiated = false;
     if (recvMsg(cli, type, payload) && type == 'A') {
         fprintf(stderr, "[webrtc] got answer — connecting\n");
         pc->setRemoteDescription(rtc::Description(payload, "answer"));
+        negotiated = true;
     } else {
         fprintf(stderr, "[webrtc] no answer — aborting session\n");
     }
 
-    // Media flows on the rtc thread -> queue -> audio thread. Hold here until the peer drops.
-    while (*running && !disconnected) std::this_thread::sleep_for(100ms);
+    // Media flows on the rtc thread -> queue -> audio thread. Hold here until the peer drops — but ONLY
+    // if we actually negotiated. A valid-secret-but-no-answer peer must not hold this single-threaded
+    // server in the spin loop (it would block every later phone); fall straight through to cleanup. (F-01)
+    while (negotiated && *running && !disconnected) std::this_thread::sleep_for(100ms);
 
     pc->close();
     pc.reset();                                         // ensure no more onMessage before we free decCtx
@@ -319,6 +351,14 @@ int run_webrtc_session(const WebrtcRecvConfig &cfg, std::atomic<bool> *running) 
         sockaddr_in ca; int cl = sizeof ca;
         SOCKET cli = accept(srv, (sockaddr *)&ca, &cl);
         if (cli == INVALID_SOCKET) continue;
+        // Bound how long a half-open / stalled peer can hold this single-threaded (backlog-1) server.
+        // Without a recv timeout, a peer that connects but never sends the 5-byte header wedges the
+        // accept loop forever and even makes Ctrl-C un-interruptible (recvAll blocks in recv()). 20s is
+        // far longer than a real pairing (the phone caps ICE gathering at 6s), so legitimate sessions
+        // are never aborted; on timeout recvAll returns false and the session cleanly aborts to accept.
+        // See docs/perf-audit F-01.
+        DWORD sigRecvTimeoutMs = 20000;
+        setsockopt(cli, SOL_SOCKET, SO_RCVTIMEO, (const char *)&sigRecvTimeoutMs, sizeof(sigRecvTimeoutMs));
         handleConnection(cli, dec, cfg, running);
         closesocket(cli);
     }

@@ -26,6 +26,8 @@ extern "C" {
 #include "usb_receiver.h"
 #include "video_sink.h"
 #include "wasapi_sink.h"
+#include "stats.h"
+#include "pro_audio.h"
 
 namespace {
 
@@ -39,8 +41,9 @@ struct PcmQueue {
 
     void push(const uint8_t *p, int n) {
         std::lock_guard<std::mutex> lk(m);
-        if (q.size() >= kMax) q.pop_front();     // drop oldest: stay low-latency, never back up video
+        if (q.size() >= kMax) { q.pop_front(); stats::g_audioQ.drop(); }   // drop oldest: stay low-latency, never back up video
         q.emplace_back(p, p + n);
+        stats::g_audioQ.observe((long)q.size());
         cv.notify_one();
     }
     bool pop(std::vector<uint8_t> &out) {
@@ -68,8 +71,13 @@ struct VideoQueue {
 
     void push(const uint8_t *p, int n) {
         std::lock_guard<std::mutex> lk(m);
-        if (q.size() >= kMax) q.pop_front();   // last-resort: shed oldest rather than grow unbounded
+        // Overflow: shed the NEWEST unit (drop this one) rather than the oldest. Dropping the oldest
+        // breaks the decoder's reference chain -> macroblock corruption until the next IDR (~1s on the
+        // phone's 1s GOP); dropping the newest keeps the buffered GOP (incl. its IDR) contiguous so
+        // decode stays clean and only the most-recent frames are lost. Still bounded. See docs/perf-audit F-02.
+        if (q.size() >= kMax) { stats::g_videoQ.drop(); return; }
         q.emplace_back(p, p + n);
+        stats::g_videoQ.observe((long)q.size());
         cv.notify_one();
     }
     bool pop(std::vector<uint8_t> &out) {
@@ -91,16 +99,28 @@ void videoThread(VideoQueue *vq, VideoSink *sink) {
     const AVCodec *decv = avcodec_find_decoder(AV_CODEC_ID_H264);
     AVCodecContext *ctx = avcodec_alloc_context3(decv);
     ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    // NOTE: decode is single-threaded on purpose. FFmpeg defaults thread_count to 1 (it does NOT
+    // auto-pick cpu_count), so H.264 frame threading is never active and adds no output delay — the
+    // F-05 "frame-threading latency" hypothesis was DISPROVEN by an on-hardware A/B (frame vs slice
+    // both ~1.8ms p50 at 720p on a 20-core PC; active_thread_type=0). Single-threaded decode is fast
+    // enough here; only revisit (thread_count=0 + FF_THREAD_SLICE) if 4K on a weak PC ever shows
+    // video.queue drops. See docs/perf-audit F-05.
     if (avcodec_open2(ctx, decv, nullptr) < 0) { fprintf(stderr, "[usb] h264 decoder open failed\n"); return; }
+    if (stats::enabled())
+        fprintf(stderr, "[stats] h264 decode: thread_count=%d active_thread_type=%d (0=none,1=FRAME,2=SLICE)\n",
+                ctx->thread_count, ctx->active_thread_type);
     std::vector<uint8_t> buf;
     long vframes = 0;
     while (vq->pop(buf)) {
         AVPacket *pk = av_packet_alloc();
         if (av_new_packet(pk, (int)buf.size()) == 0) {
             memcpy(pk->data, buf.data(), buf.size());
+            if (stats::enabled()) pk->pts = (int64_t)stats::nowUs();   // decode submit->output pairing (no-B-frame => in order)
             if (avcodec_send_packet(ctx, pk) == 0) {
                 AVFrame *fr = av_frame_alloc();
                 while (avcodec_receive_frame(ctx, fr) == 0) {
+                    if (stats::enabled() && fr->pts != AV_NOPTS_VALUE)
+                        stats::g_decodeLat.add((double)((int64_t)stats::nowUs() - fr->pts));
                     sink->WriteFrame(fr);
                     av_frame_unref(fr);
                     if ((++vframes % 150) == 0) fprintf(stderr, "[usb] %ld video frames\n", vframes);
@@ -114,6 +134,7 @@ void videoThread(VideoQueue *vq, VideoSink *sink) {
 }
 
 void audioThread(PcmQueue *pq, int rate, int channels, const UsbRecvConfig cfg) {
+    ProAudioThread proAudio;   // MMCSS "Pro Audio" scheduling for the real-time render thread (F-09)
     WasapiSink sink;
     AVCodecContext *fmt = avcodec_alloc_context3(nullptr);   // just carries the source PCM format
     fmt->sample_rate = rate;

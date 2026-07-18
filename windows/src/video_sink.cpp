@@ -1,5 +1,6 @@
 #include "video_sink.h"
 #include "preview_window.h"
+#include "stats.h"
 
 #include <atomic>
 #include <chrono>
@@ -26,10 +27,12 @@ namespace {
 std::atomic<int>  g_rotate{0};
 std::atomic<bool> g_flipH{false};
 std::atomic<bool> g_flipV{false};
+std::atomic<bool> g_previewVisible{true};   // F-34: false while the GUI's embedded preview is hidden/minimized
 }
 void VideoSetRotate(int deg) { g_rotate = ((deg % 360) + 360) % 360; }
 void VideoSetFlipH(bool on)  { g_flipH = on; }
 void VideoSetFlipV(bool on)  { g_flipV = on; }
+void VideoSetPreviewVisible(bool on) { g_previewVisible = on; }
 
 // Rotate a packed BGR24 image (w×h) clockwise by deg into out (whose dims are per-deg). No-op for 0.
 static void rotateBgr(const unsigned char *src, int w, int h, int deg, unsigned char *out) {
@@ -109,7 +112,16 @@ bool VideoSink::ensure(const AVFrame *f) {
 }
 
 bool VideoSink::WriteFrame(const AVFrame *frame) {
+    uint64_t t0 = stats::enabled() ? stats::nowUs() : 0;   // convert + transform + softcam push cost
     if (!ensure(frame)) return false;
+    bool previewWanted = wantPreview_ && g_previewVisible.load();
+#ifdef HAVE_SOFTCAM
+    // Idle skip: if no conferencing app is reading the virtual camera AND the preview is hidden, skip
+    // the color-convert + transform + softcam push + preview copy. Decode already ran above (needed to
+    // keep the H.264 reference chain intact), so a consumer that connects gets a fresh frame within
+    // ~1 frame. Saves the per-frame convert/push CPU while idle in the tray. (F-34)
+    if (!previewWanted && cam_ && !softcam::sender::IsConnected(cam_)) { ++frames_; return true; }
+#endif
     // Spin up the preview window lazily on the first video frame (never for a mic-only session).
     if (wantPreview_ && !previewThread_.joinable()) {
         previewRun_ = true;
@@ -130,7 +142,7 @@ bool VideoSink::WriteFrame(const AVFrame *frame) {
 #ifdef HAVE_SOFTCAM
     if (cam_) softcam::sender::SendFrame(cam_, outbuf);
 #endif
-    if (wantPreview_) {                       // hand the latest frame to the preview thread
+    if (previewWanted) {                      // hand the latest frame to the preview thread (skip when hidden, F-34)
         std::lock_guard<std::mutex> lk(pmutex_);
         size_t n = (size_t)outw * outh * 3;
         if (pbuf_.size() != n) pbuf_.resize(n);
@@ -138,6 +150,7 @@ bool VideoSink::WriteFrame(const AVFrame *frame) {
         pw_ = outw; ph_ = outh; pdirty_ = true;
     }
     if ((++frames_ % 60) == 0) fprintf(stderr, "[video] %ld frames decoded (%dx%d)\n", frames_, outw, outh);
+    if (t0) stats::g_sinkLat.add((double)(stats::nowUs() - t0));
     return true;
 }
 
@@ -150,8 +163,10 @@ void VideoSink::previewLoop() {
         win.Pump();
         if (win.closed()) break;
         if (pdirty_.exchange(false)) {
-            std::lock_guard<std::mutex> lk(pmutex_);
-            local = pbuf_; lw = pw_; lh = ph_;
+            // Swap the shared buffer out (O(1)) instead of copying it, and blit OUTSIDE the lock so
+            // WriteFrame isn't blocked by the GDI StretchDIBits. pbuf_ then holds `local`'s old buffer,
+            // which WriteFrame resizes+overwrites next frame — no stale/torn data. (F-22)
+            { std::lock_guard<std::mutex> lk(pmutex_); std::swap(local, pbuf_); lw = pw_; lh = ph_; }
             if (!local.empty()) win.ShowFrame(local.data(), lw, lh);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(8));

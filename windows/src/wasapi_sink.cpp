@@ -1,4 +1,5 @@
 #include "wasapi_sink.h"
+#include "stats.h"
 
 #include <windows.h>
 #include <mmdeviceapi.h>
@@ -27,6 +28,23 @@ std::string lower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(),
                    [](unsigned char c) { return (char)std::tolower(c); });
     return s;
+}
+
+// F-03 drift compensation is opt-in (env PHONECAM_DRIFT), off by default so the shipped behavior stays
+// predictable until it's validated by ear. Measured need: phone audio clock ~67ppm fast vs the PC
+// render clock -> the WASAPI ring fills ~+40ms/10min (audio.wasapi trend), eventually clicking.
+bool driftEnabled() {
+    static int v = -1;
+    if (v < 0) { const char* e = std::getenv("PHONECAM_DRIFT"); v = (e && e[0] && e[0] != '0') ? 1 : 0; }
+    return v == 1;
+}
+
+// F-11 opt-in low-latency audio: event-driven WASAPI (WaitForSingleObject instead of Sleep(2) polling)
+// with a small buffer. Off by default so the shipped 200ms/polling behavior stays predictable.
+bool lowLatencyAudioEnabled() {
+    static int v = -1;
+    if (v < 0) { const char* e = std::getenv("PHONECAM_LOWLATENCY_AUDIO"); v = (e && e[0] && e[0] != '0') ? 1 : 0; }
+    return v == 1;
 }
 
 // Wide friendly name -> narrow, for logging + matching.
@@ -177,6 +195,9 @@ struct WasapiSink::Impl {
     std::vector<Biquad> eq;    // voice EQ cascade (any number of bands), applied before the gain
     float levelPeak = 0.0f;    // running peak of the outgoing signal, for the GUI's mic meter
     DWORD levelLastMs = 0;     // last time we emitted a [level] line (throttled to ~10 Hz)
+    bool driftOk = true;       // F-03: cleared if swr_set_compensation is unsupported, to stop retrying
+    bool eventMode = false;    // F-11: event-driven render (vs Sleep(2) polling)
+    HANDLE hEvent = nullptr;   // F-11: WASAPI buffer-ready event when eventMode
 };
 
 WasapiSink::WasapiSink() : p_(new Impl) {}
@@ -250,10 +271,33 @@ bool WasapiSink::Init(const AVCodecContext* dec, const std::string& deviceMatch,
     av_channel_layout_default(&s.outLayout, s.outChannels);
     s.eq = buildEq(eqPreset, (float)s.outRate);   // voice EQ cascade (empty = off)
 
-    // 200 ms shared-mode buffer.
-    const REFERENCE_TIME kBufDuration = 2000000; // 100-ns units
-    hr = s.client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, kBufDuration, 0, s.mix, nullptr);
-    if (FAILED(hr)) { fprintf(stderr, "[audio] IAudioClient::Initialize 0x%08lx\n", hr); return false; }
+    // Default: a 200 ms shared-mode buffer drained by polling. Opt-in low-latency mode (F-11): event-
+    // driven with a 30 ms buffer, so the render loop waits on the engine event instead of Sleep(2) and
+    // the standing latency ceiling is far lower. Falls back to the default on any event-init failure.
+    if (lowLatencyAudioEnabled()) {
+        HRESULT ehr = s.client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                                           300000 /*30ms*/, 0, s.mix, nullptr);
+        if (SUCCEEDED(ehr)) {
+            s.hEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (s.hEvent && SUCCEEDED(s.client->SetEventHandle(s.hEvent))) {
+                s.eventMode = true;
+                fprintf(stderr, "[audio] low-latency mode: event-driven, 30ms buffer\n");
+            }
+        }
+        if (!s.eventMode) {
+            fprintf(stderr, "[audio] low-latency (event) init unavailable — using default 200ms polling\n");
+            (void)ehr;
+            if (s.hEvent) { CloseHandle(s.hEvent); s.hEvent = nullptr; }
+            // Initialize can only be called once per IAudioClient, so get a fresh one for the fallback.
+            s.client->Release(); s.client = nullptr;
+            if (FAILED(s.device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&s.client))) return false;
+        }
+    }
+    if (!s.eventMode) {
+        const REFERENCE_TIME kBufDuration = 2000000; // 200 ms (100-ns units)
+        hr = s.client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, kBufDuration, 0, s.mix, nullptr);
+        if (FAILED(hr)) { fprintf(stderr, "[audio] IAudioClient::Initialize 0x%08lx\n", hr); return false; }
+    }
 
     hr = s.client->GetBufferSize(&s.bufferFrames);
     if (FAILED(hr)) return false;
@@ -281,6 +325,8 @@ bool WasapiSink::WriteFrame(const AVFrame* frame) {
     Impl& s = *p_;
     if (!s.started) return false;
 
+    uint64_t t0 = stats::enabled() ? stats::nowUs() : 0;   // resample + EQ/gain + render cost
+
     int outNb = swr_get_out_samples(s.swr, frame->nb_samples);
     if (outNb <= 0) return true;
 
@@ -294,6 +340,9 @@ bool WasapiSink::WriteFrame(const AVFrame* frame) {
     int got = swr_convert(s.swr, &s.buf, outNb,
                           (const uint8_t* const*)frame->extended_data, frame->nb_samples);
     if (got < 0) return false;
+
+    if (stats::enabled())   // samples still buffered inside the resampler, as ms
+        stats::g_swrDelay.add(1000000.0 * swr_get_delay(s.swr, s.outRate) / s.outRate);
 
     // Voice EQ (per-channel biquad cascade) -> mic boost -> soft limit, in the endpoint's sample format.
     if ((s.gainLinear != 1.0f || !s.eq.empty()) && got > 0 && s.outChannels <= 8) {
@@ -345,19 +394,48 @@ bool WasapiSink::WriteFrame(const AVFrame* frame) {
         }
     }
 
+    // Standing WASAPI latency: how much audio is already queued in the render buffer. Rising over a long
+    // call = phone-vs-PC clock drift filling the ring (F-03); the 200ms buffer is a ceiling (F-11).
+    UINT32 pad = 0;
+    bool havePad = SUCCEEDED(s.client->GetCurrentPadding(&pad));
+    if (stats::enabled() && havePad)
+        stats::g_wasapiPad.add(1000000.0 * pad / s.outRate);
+
+    // F-03 drift compensation (opt-in): hold the ring near a target depth so the ~67ppm clock offset
+    // can't slowly fill it. Proportional control on the padding error, clamped to +/-1000ppm (an
+    // inaudible pitch nudge for voice), 5ms deadband. Negative sample_delta drains an over-full ring;
+    // if the padding trend rises instead of flattening under this, the sign is wrong. Verify by the
+    // audio.wasapi trend; validate absence of artifacts by ear before defaulting on.
+    if (driftEnabled() && s.driftOk && havePad && s.swr) {
+        double target = 0.030 * s.outRate;                 // aim ~30ms of standing latency
+        double err = (double)pad - target;                 // >0 = ring too full (phone ahead)
+        if (std::fabs(err) < 0.005 * s.outRate) err = 0.0;  // 5ms deadband, no hunting
+        double maxc = 0.001 * s.outRate;                    // +/-1000 ppm cap
+        double comp = -0.02 * err;                          // proportional; negative => output fewer => drain
+        if (comp > maxc) comp = maxc; else if (comp < -maxc) comp = -maxc;
+        if (swr_set_compensation(s.swr, (int)std::lround(comp), (int)s.outRate) < 0) {
+            s.driftOk = false;
+            fprintf(stderr, "[audio] drift compensation unsupported by resampler — disabled\n");
+        }
+    }
+
     // Push into the WASAPI render buffer, waiting for space as it drains at real time.
     int written = 0, guard = 0;
     while (written < got && guard++ < 1000) {
         UINT32 padding = 0;
         if (FAILED(s.client->GetCurrentPadding(&padding))) return false;
         UINT32 avail = s.bufferFrames - padding;
-        if (avail == 0) { Sleep(2); continue; }
+        if (avail == 0) { if (s.eventMode) WaitForSingleObject(s.hEvent, 100); else Sleep(2); continue; }   // F-11
         UINT32 chunk = std::min<UINT32>(avail, (UINT32)(got - written));
         BYTE* dst = nullptr;
         if (FAILED(s.render->GetBuffer(chunk, &dst))) return false;
         memcpy(dst, s.buf + (size_t)written * s.blockAlign, (size_t)chunk * s.blockAlign);
         s.render->ReleaseBuffer(chunk, 0);
         written += chunk;
+    }
+    if (stats::enabled()) {
+        if (frame->pts > 0) stats::g_audioE2E.add((double)((int64_t)stats::nowUs() - frame->pts));   // WebRTC arrival->submit
+        if (t0) stats::g_audioSink.add((double)(stats::nowUs() - t0));
     }
     return true;
 }
@@ -366,6 +444,7 @@ void WasapiSink::Stop() {
     if (!p_) return;
     Impl& s = *p_;
     if (s.client && s.started) { s.client->Stop(); s.started = false; }
+    if (s.hEvent) { CloseHandle(s.hEvent); s.hEvent = nullptr; }   // F-11
     av_freep(&s.buf); s.bufSamples = 0;
     if (s.swr) { swr_free(&s.swr); }
     av_channel_layout_uninit(&s.outLayout);

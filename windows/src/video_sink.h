@@ -62,3 +62,4 @@ private:
 void VideoSetRotate(int deg);    // 0/90/180/270 clockwise
 void VideoSetFlipH(bool on);     // mirror left/right
 void VideoSetFlipV(bool on);     // flip top/bottom
+void VideoSetPreviewVisible(bool on);   // GUI tells us when its embedded preview is hidden (F-34)

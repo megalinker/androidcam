@@ -27,6 +27,7 @@
 #include "webrtc_receiver.h"   // PCAM3 signaling + DTLS-SRTP Opus/H264 -> WASAPI + softcam
 #include "usb_receiver.h"      // scrcpy-style H.264/PCM over an adb-forwarded socket -> WASAPI + softcam
 #include "video_sink.h"        // VideoSetRotate/FlipH/FlipV — manual, live output transform
+#include "stats.h"             // flag-gated (PHONECAM_STATS) latency/queue instrumentation
 
 static std::atomic<bool> g_running{true};
 static void on_sigint(int) { g_running = false; }
@@ -57,6 +58,7 @@ static void stdin_control_thread() {
         if (cmd == "fliph") { int v = 0; ss >> v; VideoSetFlipH(v != 0); }
         else if (cmd == "flipv") { int v = 0; ss >> v; VideoSetFlipV(v != 0); }
         else if (cmd == "rotate") { int v = 0; ss >> v; VideoSetRotate(v); }
+        else if (cmd == "preview") { int v = 1; ss >> v; VideoSetPreviewVisible(v != 0); }   // F-34: hidden => skip idle video work
     }
 }
 
@@ -86,6 +88,7 @@ static Options parse_args(int argc, char **argv) {
 int main(int argc, char **argv) {
     Options opt = parse_args(argc, argv);
     signal(SIGINT, on_sigint);
+    stats::banner();   // one line if PHONECAM_STATS is set; instrumentation is otherwise a no-op
 
     // Manual output transform (applies to both transports' video). Initial state from flags; the GUI
     // updates it live over stdin as the user toggles Flip/Rotate. NEVER changed automatically.
