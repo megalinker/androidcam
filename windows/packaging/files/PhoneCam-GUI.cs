@@ -65,7 +65,7 @@ public class PhoneCamGui : Form
     }
 
     LinkLabel linkDiag;
-    CheckBox cbMic, cbFlipH, cbFlipV;
+    CheckBox cbMic, cbFlipH, cbFlipV, cbRawMic;
     ComboBox cbBoost, cbEq, cbRotate;
     Button btnSwitchCam;
     string customEq = "";        // user-defined band list ("type:f:q:db;...") from the EQ editor
@@ -87,6 +87,7 @@ public class PhoneCamGui : Form
     System.Windows.Forms.Timer timer;
     Process recv;
     IntPtr embedded = IntPtr.Zero;
+    Size lastPreviewSize = Size.Empty;   // F-28: only re-MoveWindow the embedded preview when it changes
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, settingsPath, logPath;
@@ -101,6 +102,7 @@ public class PhoneCamGui : Form
     string pairSecret = "";      // persisted secret, so a phone that saved us can reconnect later
     DateTime pairWaitSince = DateTime.MinValue;   // when the WebRTC QR went up (to time the VPN hint)
     bool running = false;
+    bool starting = false;   // set synchronously while an async Start (F-18) is in flight, to block re-entry
     volatile bool videoSeen = false, audioSeen = false;   // from receiver stderr, drive the status
     volatile bool streamDropped = false;   // the phone's stream ended mid-session (receiver is re-listening)
 
@@ -175,9 +177,12 @@ public class PhoneCamGui : Form
                                            "EQ: Clarity+", "EQ: Warm+", "EQ: Bright+", "EQ: Podcast+", "EQ: Custom…" });
         cbEq.SelectedIndex = 0;
         cbEq.SelectedIndexChanged += OnEqChanged;
-        cbMic.CheckedChanged += (s, e) => { cbBoost.Enabled = cbMic.Checked; cbEq.Enabled = cbMic.Checked; };
-        cbBoost.Enabled = cbMic.Checked; cbEq.Enabled = cbMic.Checked;
-        Controls.Add(cbMic); Controls.Add(cbBoost); Controls.Add(cbEq);
+        // Opt-in raw mic: capture without the phone's echo-canceller (nothing to echo-cancel for a
+        // remote mic — usually clearer/fuller). Off by default. (F-12)
+        cbRawMic = Check("Raw mic (no AEC)", 22, 250);
+        cbMic.CheckedChanged += (s, e) => { cbBoost.Enabled = cbMic.Checked; cbEq.Enabled = cbMic.Checked; cbRawMic.Enabled = cbMic.Checked; };
+        cbBoost.Enabled = cbMic.Checked; cbEq.Enabled = cbMic.Checked; cbRawMic.Enabled = cbMic.Checked;
+        Controls.Add(cbMic); Controls.Add(cbBoost); Controls.Add(cbEq); Controls.Add(cbRawMic);
 
         // Manual image controls — mirror / flip / rotate the camera. NEVER automatic; the user drives
         // them, and they apply LIVE (sent to the running receiver) as well as at the next Start.
@@ -270,7 +275,7 @@ public class PhoneCamGui : Form
         var miTray = new ToolStripMenuItem("Minimize to tray") { CheckOnClick = true, Checked = minimizeToTray };
         miTray.Click += (s, e) => { minimizeToTray = miTray.Checked; SaveSettings(); };
         var miListen = new ToolStripMenuItem("Auto-listen for my phone (WebRTC)") { CheckOnClick = true, Checked = autoListen };
-        miListen.Click += (s, e) => { autoListen = miListen.Checked; SaveSettings(); if (autoListen && !running && !reconnecting) StartAutoListen(); };
+        miListen.Click += (s, e) => { autoListen = miListen.Checked; SaveSettings(); if (autoListen && !running && !reconnecting && !starting) StartAutoListen(); };
         var stop = new ToolStripMenuItem("Stop streaming");
         stop.Click += (s, e) => { if (running || reconnecting) { manualStop = true; StopReceiver(); } };
         var exit = new ToolStripMenuItem("Exit"); exit.Click += (s, e) => Close();
@@ -287,13 +292,15 @@ public class PhoneCamGui : Form
     /// no PC interaction. The receiver keeps re-listening internally, so the PC stays ready between streams.</summary>
     void StartAutoListen()
     {
-        if (receiverExe == null || running || reconnecting) return;
+        if (receiverExe == null || running || reconnecting || starting) return;
         StartReceiver();
     }
 
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
+        // Tell the receiver to pause preview work while the window is minimized/hidden (F-34). No-op when idle.
+        SendRecv(WindowState == FormWindowState.Minimized ? "preview 0" : "preview 1");
         if (minimizeToTray && tray != null && WindowState == FormWindowState.Minimized) Hide();
     }
 
@@ -339,6 +346,7 @@ public class PhoneCamGui : Form
         cbMic.Enabled = on;
         cbBoost.Enabled = on && cbMic.Checked;
         cbEq.Enabled = on && cbMic.Checked;
+        cbRawMic.Enabled = on && cbMic.Checked;
     }
 
     // Timestamped rolling log — the source for "Copy diagnostics" and a file the user can share.
@@ -412,7 +420,7 @@ public class PhoneCamGui : Form
     void OnStartStop(object sender, EventArgs e)
     {
         if (running || reconnecting) { manualStop = true; StopReceiver(); }   // deliberate stop — no relaunch
-        else StartReceiver();
+        else if (!starting) StartReceiver();
     }
 
     // "EQ: Custom…" opens the band editor; presets just select. On cancel, revert to the last choice.
@@ -455,14 +463,39 @@ public class PhoneCamGui : Form
 
     void StartReceiver()
     {
+        // Re-entry guard: `running` is now set asynchronously (below), so it can't gate a second Start
+        // during the multi-second adb window — `starting` (set synchronously here) does. (F-18)
+        if (running || reconnecting || starting) return;
         bool useMic = cbMic.Checked;
+        bool rawMic = cbRawMic.Checked;   // captured on the UI thread (F-12)
         if (!PrepareMic(ref useMic)) return;
         manualStop = false; reconnecting = false; wentLive = false; reconnectAttempts = 0;
         webrtcMode = false; usbMode = false;
-        // Prefer the cable: if an authorized phone is on USB (adb), stream over it — no QR, no tethering.
-        string dev = (adbExe != null) ? AdbDevice() : null;
-        if (dev != null) { Log("Start: USB (adb device " + dev + ", mic=" + useMic + ")"); StartUsbPath(useMic); }
-        else { Log("Start: WebRTC (mic=" + useMic + ")"); StartWebrtcPairing(); }
+        // adb detection + the USB setup chain are blocking process calls (up to ~30s of timeouts on a
+        // bad cable). Run them off the UI thread so the window never freezes ("Not Responding") during
+        // Start, then marshal the launch back to the UI thread. (F-18)
+        SetStatus(Amber, "Starting…");
+        btnStart.Enabled = false;
+        starting = true;
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            // worker thread — no UI access here
+            string dev = (adbExe != null) ? AdbDevice() : null;
+            bool usbReady = false; string usbFail = null;
+            if (dev != null) usbReady = UsbAdbSetup(useMic, rawMic, out usbFail);
+            try
+            {
+                BeginInvoke((Action)(() =>
+                {
+                    btnStart.Enabled = true;
+                    starting = false;
+                    if (dev != null && usbReady) { Log("Start: USB (adb device " + dev + ", mic=" + useMic + ")"); usbMode = true; SetStatus(Amber, "USB — starting the phone over the cable…"); StartUsbReceiver(useMic); }
+                    else if (dev != null) { Log("adb setup failed: " + usbFail + " — falling back to Wi-Fi"); StartWebrtcPairing(); }
+                    else { Log("Start: WebRTC (mic=" + useMic + ")"); StartWebrtcPairing(); }
+                }));
+            }
+            catch { }   // form closed mid-start
+        });
     }
 
     /// <summary>Run bundled/system adb with `args`; returns true on exit 0. Output (stdout+stderr) in `output`.</summary>
@@ -503,11 +536,16 @@ public class PhoneCamGui : Form
     /// taps Switch on the phone (the PC has no control channel to it).</summary>
     void SwitchPhoneCamera()
     {
-        string outp;
-        if (adbExe != null && AdbDevice() != null)
-            AdbRun("shell am broadcast -n com.phonecam/.ControlReceiver -a com.phonecam.action.SWITCH_CAMERA", out outp, 4000);
-        else
-            SetStatus(Amber, "To switch camera over Wi-Fi, tap Switch on the phone.");
+        // adb device check + broadcast are blocking process calls — off the UI thread so the button
+        // click doesn't freeze the window. (F-18)
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            string outp;
+            if (adbExe != null && AdbDevice() != null)
+                AdbRun("shell am broadcast -n com.phonecam/.ControlReceiver -a com.phonecam.action.SWITCH_CAMERA", out outp, 4000);
+            else
+                try { BeginInvoke((Action)(() => SetStatus(Amber, "To switch camera over Wi-Fi, tap Switch on the phone."))); } catch { }
+        });
     }
 
     /// <summary>Serial of the single authorized USB device, or null (none / unauthorized / more than one).</summary>
@@ -532,26 +570,24 @@ public class PhoneCamGui : Form
 
     /// <summary>USB path: forward the media port, grant perms, auto-start the phone app in USB mode over
     /// adb, then pull H.264/PCM with receiver --usb. No QR, no tethering. Falls back to Wi-Fi on failure.</summary>
-    void StartUsbPath(bool useMic)
+    /// <summary>Worker-thread ONLY (no UI access): clear+set the adb forward, pre-grant perms, wake the
+    /// phone, and launch its app in USB mode. Returns false (with a reason) if the forward can't be set,
+    /// so the caller can fall back to Wi-Fi. The receiver launch + UI updates happen on the UI thread
+    /// in StartReceiver's continuation. (F-18)</summary>
+    bool UsbAdbSetup(bool useMic, bool rawMic, out string fail)
     {
-        usbMode = true; webrtcMode = false;
-        string outp;
+        fail = null; string outp;
         AdbRun("forward --remove tcp:" + UsbPort, out outp, 4000);   // clear any stale forward
-        if (!AdbRun("forward tcp:" + UsbPort + " tcp:" + UsbPort, out outp, 5000))
-        {
-            Log("adb forward failed: " + outp + " — falling back to Wi-Fi");
-            usbMode = false; StartWebrtcPairing(); return;
-        }
+        if (!AdbRun("forward tcp:" + UsbPort + " tcp:" + UsbPort, out outp, 5000)) { fail = "adb forward: " + outp; return false; }
         // Pre-grant so the phone's auto-start doesn't stall on a permission dialog (best-effort).
         foreach (var perm in new[] { "android.permission.CAMERA", "android.permission.RECORD_AUDIO", "android.permission.POST_NOTIFICATIONS" })
             AdbRun("shell pm grant com.phonecam " + perm, out outp, 4000);
         AdbRun("shell input keyevent KEYCODE_WAKEUP", out outp, 3000);
         // Cam+Mic when the mic is wanted, camera-only otherwise (the phone honors this mode).
         string mode = useMic ? "BOTH" : "CAMERA_ONLY";
-        if (!AdbRun("shell am start -n com.phonecam/.MainActivity -a com.phonecam.action.USB --ei usbPort " + UsbPort + " --es mode " + mode, out outp, 6000))
+        if (!AdbRun("shell am start -n com.phonecam/.MainActivity -a com.phonecam.action.USB --ei usbPort " + UsbPort + " --es mode " + mode + " --ez rawMic " + (rawMic ? "true" : "false"), out outp, 6000))
             Log("adb am start returned: " + outp);   // continue anyway; receiver --usb retries the connection
-        SetStatus(Amber, "USB — starting the phone over the cable…");
-        StartUsbReceiver(useMic);
+        return true;
     }
 
     /// <summary>Launch (or relaunch, for auto-reconnect) receiver.exe in --usb mode.</summary>
@@ -599,10 +635,17 @@ public class PhoneCamGui : Form
             // The phone leaving ends the session; the receiver keeps listening for it to come back.
             if (d.IndexOf("session ended", StringComparison.OrdinalIgnoreCase) >= 0) streamDropped = true;
         };
-        try { recv.Start(); recv.BeginErrorReadLine(); }
+        // Drain stdout too: it's redirected, and libdatachannel's logger can write to it. If nothing
+        // reads it, a full ~4KB pipe blocks the thread that logged — so consume+discard it. (F-19)
+        recv.OutputDataReceived += (s, ev) => { };
+        try { recv.Start(); recv.BeginErrorReadLine(); recv.BeginOutputReadLine(); }
         catch (Exception ex) { Log("receiver start FAILED: " + ex.Message); MessageBox.Show("Failed to start receiver: " + ex.Message, "PhoneCam"); StopReceiver(); return; }
 
         running = true; embedded = IntPtr.Zero;
+        // Sync preview-visible state to the receiver now that it's running (F-34): on the -tray autostart
+        // path the window is already minimized before the receiver launched, so OnResize's earlier
+        // "preview 0" reached no process. Re-send it so the idle-skip engages while hidden in the tray.
+        SendRecv(WindowState == FormWindowState.Minimized ? "preview 0" : "preview 1");
         if (!webrtcMode) previewHint.Visible = true;   // WebRTC keeps the QR up until the phone connects
         tip.Text = TipText(useMic);
         SetInputsEnabled(false);
@@ -800,13 +843,15 @@ public class PhoneCamGui : Form
                 SetWindowLong(hwnd, GWL_STYLE, st);
                 SetParent(hwnd, preview.Handle);
                 MoveWindow(hwnd, 0, 0, preview.ClientSize.Width, preview.ClientSize.Height, true);
+                lastPreviewSize = preview.ClientSize;
                 embedded = hwnd;
                 previewHint.Visible = false;
             }
         }
-        else
+        else if (preview.ClientSize != lastPreviewSize)   // only when the panel actually resized (F-28)
         {
             MoveWindow(embedded, 0, 0, preview.ClientSize.Width, preview.ClientSize.Height, true);
+            lastPreviewSize = preview.ClientSize;
         }
 
         bool hasVideo = videoSeen || embedded != IntPtr.Zero;
@@ -883,6 +928,7 @@ public class PhoneCamGui : Form
                 var kv = line.Split(new[] { '=' }, 2); if (kv.Length != 2) continue;
                 switch (kv[0]) {
                     case "mic": cbMic.Checked = kv[1] == "1"; break;
+                    case "rawmic": cbRawMic.Checked = kv[1] == "1"; break;
                     case "srtpass": pairSecret = kv[1]; break;   // migrate the secret from pre-0.5 settings
                     case "pairsecret": pairSecret = kv[1]; break;
                     case "autolisten": autoListen = kv[1] == "1"; break;
@@ -910,6 +956,7 @@ public class PhoneCamGui : Form
             Directory.CreateDirectory(Path.GetDirectoryName(settingsPath));
             var lines = new List<string> {
                 "mic=" + (cbMic.Checked ? "1" : "0"),
+                "rawmic=" + (cbRawMic.Checked ? "1" : "0"),
                 "pairsecret=" + pairSecret,
                 "boost=" + cbBoost.SelectedIndex,
                 "eqcustom=" + customEq,
