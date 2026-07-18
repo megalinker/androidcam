@@ -42,8 +42,9 @@ class StreamService : Service() {
         const val ACTION_SWITCH_CAMERA = "com.phonecam.action.SWITCH_CAMERA"
         const val EXTRA_MODE = "mode"
         const val EXTRA_QUALITY = "quality"
-        // Opt-in "clean mic": capture without the platform voice AEC/NS (the phone is a standalone
-        // remote mic — it has nothing to echo-cancel). Default false keeps AEC/NS. (F-12)
+        // Raw mic: capture without the platform voice AEC/NS (the phone is a standalone remote mic —
+        // it has nothing to echo-cancel, and raw sounds fuller). Default true = raw; the desktop app's
+        // "Phone-call noise filter" checkbox turns the processing back on for noisy rooms. (F-12)
         const val EXTRA_RAW_MIC = "rawMic"
         // Transport: "webrtc" (default, Wi-Fi) or "usb" (scrcpy-style H.264/PCM over an adb-forwarded socket).
         const val EXTRA_TRANSPORT = "transport"
@@ -121,7 +122,7 @@ class StreamService : Service() {
         val quality = intent?.getStringExtra(EXTRA_QUALITY)?.let { runCatching { Quality.valueOf(it) }.getOrNull() }
             ?: DEFAULT_QUALITY
         val transport = intent?.getStringExtra(EXTRA_TRANSPORT) ?: "webrtc"
-        val rawMic = intent?.getBooleanExtra(EXTRA_RAW_MIC, false) ?: false
+        val rawMic = intent?.getBooleanExtra(EXTRA_RAW_MIC, true) ?: true   // default = raw/fuller mic (better sounding)
 
         startForegroundForMode(mode)
         if (transport == "usb") {

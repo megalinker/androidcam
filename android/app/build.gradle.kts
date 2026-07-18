@@ -13,8 +13,8 @@ android {
         applicationId = "com.phonecam"
         minSdk = 21
         targetSdk = 34
-        versionCode = 37
-        versionName = "0.5.4"
+        versionCode = 38
+        versionName = "0.6.0"
 
         ndk {
             // Ship only ARM ABIs: the org.webrtc native lib is large and x86/x86_64 are emulator-only
