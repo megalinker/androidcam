@@ -21,6 +21,11 @@ Media uses WebRTC with Opus (audio), H.264 (video), and authenticated
 DTLS-SRTP encryption. Pairing and media stay on your LAN, direct between the
 phone and PC; there is no cloud signaling service.
 
+IMAGE CONTROLS
+  Mirror (L/R), Flip (U/D), Rotate, and Switch camera (front/back) are buttons in
+  the Windows app. They apply live while streaming and are never automatic - the
+  picture is shown exactly as the camera sees it until you change it.
+
 RECONNECTING
   After the first scan, the phone shows Reconnect. Either side may be started
   first: the phone retries the saved PC endpoint while it waits for the Windows

@@ -2,57 +2,81 @@
 
 ## Goal
 
-Turn an Android phone into a **max-quality webcam and/or microphone** for a **Windows 10/11** PC over **Wi-Fi**. The camera needs **no third-party software** on the PC; the microphone rides a virtual-audio endpoint (VB-CABLE, or the optional kernel driver under `windows/driver/`). The user chooses camera-only, mic-only, or both.
+Turn an Android phone into a **webcam and/or microphone** for a **Windows 10/11** PC, at the lowest practical latency, with **minimal PC-side setup**. The camera needs no third-party software; the microphone rides a virtual-audio endpoint (VB-CABLE, or the optional kernel driver in `windows/driver/`). The user picks camera-only, mic-only, or both.
 
 ## Constraints that shaped the design
 
-1. **Windows 10, not just 11.** The clean modern virtual-camera API (Media Foundation `MFCreateVirtualCamera`) is **Windows 11 only (build 22000+)**. Windows 11's built-in "phone as connected camera" (Phone Link) also does **not** exist on Windows 10. So on Win10 the virtual camera must be a **DirectShow filter**.
-2. **Minimal PC-side setup.** The camera sink is built in (no OBS Virtual Camera dependency). The mic needs a kernel capture endpoint, which Windows has no user-mode way to add — so it uses a pre-signed virtual-audio cable (VB-CABLE) or the optional bundled driver.
-3. **Wi-Fi / LAN transport.** Media is LAN-direct (host ICE candidates only, no STUN/TURN). USB tethering is a possible future path; there is no USB UVC-gadget mode. Network jitter/bandwidth is the quality ceiling.
-4. **Mic + cam as a toggle.** Windows treats camera and microphone as unrelated device classes, so these are **two independent virtual devices**; the phone's mode decides which media tracks it sends and the receiver feeds whichever sink applies.
+1. **Windows 10, not just 11.** The modern virtual-camera API (Media Foundation `MFCreateVirtualCamera`) is **Windows 11 only (22000+)**, and Win11's "phone as connected camera" (Phone Link) doesn't exist on Win10. So the virtual camera must be a **DirectShow filter**.
+2. **No mandatory extra apps for video.** The camera sink is built in (no OBS Virtual Camera dependency). The mic needs a *kernel* capture endpoint — Windows has no user-mode way to add one — so it uses a pre-signed virtual cable (VB-CABLE) or the optional bundled driver.
+3. **Two links, same pipeline.** USB (a cable) and Wi-Fi (WebRTC) both terminate in the *same* FFmpeg-decode → softcam/WASAPI code on the PC. Only the transport differs.
+4. **Cam + mic as a per-mode toggle.** Windows treats camera and microphone as unrelated device classes, so these are two independent virtual devices; the phone's mode decides which media it sends and the receiver feeds whichever sink applies.
 
 ## The camera/mic asymmetry (the key fact)
 
 | | Virtual camera | Virtual microphone |
 |---|---|---|
-| Windows mechanism | user-mode DirectShow filter (COM DLL) | **kernel-mode** audio driver (WDM/PortCls WaveRT) |
-| Install | `regsvr32 softcam.dll` (x86 **and** x64) | driver install (INF), or a pre-signed cable (VB-CABLE) |
-| Code signing | **none** | **required** for a custom driver — VB-CABLE sidesteps it (already MS-signed) |
-| Effort | low; reuse `softcam` (MIT) | high for a custom driver; VB-CABLE is the practical default |
-| Visible in | DirectShow apps: Zoom, Teams, Discord, Webex, OBS, Chrome/Edge | all apps (kernel endpoint) |
-| **Not** visible in | built-in Windows Camera app, some MF-only UWP/Store apps | — |
+| Windows mechanism | user-mode DirectShow filter (COM DLL) | **kernel-mode** audio endpoint |
+| Install | `regsvr32 softcam.dll` (x86 **and** x64) | a pre-signed cable (VB-CABLE), or a driver INF |
+| Code signing | **none** | required for a custom driver — VB-CABLE sidesteps it |
+| Visible in | DirectShow apps: Zoom, Teams, Discord, OBS, Chrome/Edge | all apps (kernel endpoint) |
+| **Not** visible in | built-in Windows *Camera* app, some MF-only UWP apps | — |
 
-→ The camera shipped first (no signing); the mic followed, resolved by routing through VB-CABLE.
+→ The camera shipped first (no signing); the mic followed, resolved by routing decoded audio through VB-CABLE.
 
-## Transport: WebRTC (DTLS-SRTP), FFmpeg codecs on the PC
+## Transport 1 — Wi-Fi: WebRTC (DTLS-SRTP)
 
-- **WebRTC, LAN-direct.** The phone (org.webrtc) and the PC (libdatachannel) exchange SDP over a small TCP signaling channel (PCAM3) gated by a `pairSecret` from the QR, then media flows over UDP with **host ICE candidates only** — no STUN/TURN, no cloud. The DTLS fingerprints in the SDP are the pinned identity.
-- **PC offers, phone answers.** The PC is the offerer/listener (recvonly Opus + H.264); the phone answers sendonly. So the PC needs no knowledge of the phone's address up front — the phone dials out after scanning the QR, which also traverses most home-router topologies cleanly.
-- **A/V sync for free.** Opus and H.264 are separate SRTP tracks but share the WebRTC clock and RTCP sender reports, so lip-sync is handled by the stack rather than by manual re-timing.
-- The receiver decodes with **FFmpeg** (`avcodec_send_packet`/`avcodec_receive_frame`), `sws_scale` → BGR for softcam, `swresample` → 16-bit PCM for the audio endpoint. libdatachannel handles DTLS-SRTP + RTP; FFmpeg is codecs only (no avformat).
-- **History:** the MVP used an on-device **RTSP** server (later an encrypted **SRT** variant) with FFmpeg's `avformat` demuxer on the PC — simplest to stand up, but higher latency and a permanent backlog on the camera path. Both were retired once WebRTC video passed the real-device latency gate.
+- **Stacks.** Phone = **`org.webrtc`** (the maintained `stream-webrtc-android` artifact). PC = **libdatachannel** (DTLS-SRTP + RTP via libjuice/libsrtp), *not* a full `libwebrtc` build — that keeps the receiver small and self-contained.
+- **Signaling = PCAM3.** The desktop app shows a QR `PCAM3:<pc-ip>:<port>:<secret>` (TCP **8891**). The phone dials that endpoint and the two exchange SDP over a tiny framed TCP channel: `[1 byte type][4-byte big-endian length][payload]`, types `S` = pairSecret, `O` = offer, `A` = answer. **Non-trickle** — ICE candidates are inline in the SDP.
+- **PC offers, phone answers.** The PC is the offerer/listener (**recvonly** Opus + H.264); the phone answers **sendonly**. A sendonly *offer* to an unprepared answerer is rejected, which is why the roles are this way round. The phone dialing out also traverses most home routers cleanly, and lets it retry a saved endpoint.
+- **LAN-direct, pinned identity.** **Host ICE candidates only** — no STUN, no TURN, no cloud. The `pairSecret` gates the signaling channel; the DTLS fingerprints in the SDP are the pinned identity.
+- **A/V sync for free.** Opus and H.264 are separate SRTP tracks sharing the WebRTC clock + RTCP sender reports, so lip-sync is handled by the stack.
+- **Codecs stay on FFmpeg.** libdatachannel delivers decrypted RTP; the receiver decodes with `avcodec_send_packet`/`avcodec_receive_frame`, `sws_scale` → BGR for softcam, `swresample` → PCM for the audio endpoint. No `avformat`.
 
-### Encoder targets (max quality vs. a real Wi-Fi link)
+## Transport 2 — USB: a scrcpy-style pipe over adb
 
-- **Sweet spot:** 1080p @ 30–60 fps, H.264, ~6–8 Mbps; the phone captures up to the selected Quality preset and WebRTC adapts bitrate / sheds resolution under congestion.
-- **4K30** only if the link + PC decoder genuinely keep up.
-- Prefer **5 GHz Wi-Fi**. H.264 (not HEVC) is the safe default for decoder compatibility, and matches the PC's offered codec.
+The cable is the steadiest link (no Wi-Fi jitter, congestion, or AP-isolation), so it's preferred when available. But it needs a *different* transport, for a hard reason:
+
+> **WebRTC media is UDP; `adb forward` is TCP-only; and libdatachannel's ICE (libjuice) is UDP-only.** So the Wi-Fi WebRTC media simply can't ride an adb tunnel. Modeled on **[scrcpy](https://github.com/Genymobile/scrcpy)**, the USB path is therefore its own thing: MediaCodec-encoded media over a raw framed TCP socket.
+
+- **Phone side** (`UsbStreamer.kt`): Camera2 feeds a **MediaCodec H.264** encoder through its input Surface (GPU path, `KEY_LOW_LATENCY`, no B-frames, 1 s GOP); the mic is captured as **raw PCM** (S16LE 48 kHz — USB has bandwidth to spare, so no audio codec/latency). The phone binds a TCP `ServerSocket` on `127.0.0.1:27183` and the PC connects through the forward. The MediaCodec callback runs on a **background thread** (writing to a socket on the main thread throws `NetworkOnMainThreadException`).
+- **Frame protocol:** `[1 byte type][8-byte ptsUs big-endian][4-byte length big-endian][payload]`. `H` = one JSON header (geometry, audio rate/channels), `V` = H.264 Annex-B (the codec-config SPS/PPS is the first `V`), `A` = interleaved PCM.
+- **PC side** (`usb_receiver.cpp`, `receiver --usb --usb-port <n>`): connects to the adb-forwarded port; a receive thread does I/O only and dispatches `V` to a **decode thread** and `A` to an **audio thread**, so neither can starve the socket reads. Same FFmpeg → softcam / WASAPI sinks as WebRTC.
+- **Orchestration** (desktop app): on Start it detects an authorized adb device, runs `adb forward tcp:27183 tcp:27183`, `pm grant`s camera/mic, `am start`s the app with `ACTION_USB`, and launches `receiver --usb`. **No QR, no tethering** — plug in and press Start.
+
+## Transport 3 — USB tethering (a WebRTC-over-cable fallback)
+
+If the user prefers not to enable USB debugging, they can turn on **USB tethering**. Android then exposes an RNDIS/NCM interface (the PC gets a `192.168.42.x` address), which *is* a UDP-capable network over the cable. The desktop app detects that adapter, encodes its IP in the QR, and binds the receiver's ICE to it (`--ice-bind`), so the normal WebRTC path runs over USB instead of Wi-Fi. Enabling tethering stays a manual OS toggle (Android has no reliable non-root way to flip it), but detection + routing are automatic. On the phone, `PeerConnectionFactory.Options.disableNetworkMonitor` makes libwebrtc enumerate interfaces natively so the tethering interface is offered as an ICE candidate.
+
+## Transport selection (desktop app, on Start)
+
+1. **Authorized adb device present →** USB (scrcpy-style). Best latency, no scan, no tethering.
+2. **A `192.168.42.x` (USB-tethering) adapter present →** WebRTC over the cable (ICE bound to it).
+3. **Otherwise →** Wi-Fi WebRTC (show the QR).
+
+## The virtual camera is a fixed resolution
+
+WebRTC ramps resolution up from a low start (~360p) toward the selected quality. The receiver used to recreate the softcam camera on every resolution change — but recreating a DirectShow filter while a conferencing app reads it **crashes**, and conferencing apps also dislike the resolution changing mid-call. So `VideoSink` now picks an output size **once** from the first frame's aspect (short side → 720) and scales every frame to it: softcam is created once, and only the swscale context rebuilds on a source-size change.
+
+## Orientation is manual, never automatic
+
+The phone streams the sensor-native image. All correction — mirror, flip, rotate — is a user button in the desktop app, applied live (over `receiver.exe`'s stdin) and persisted; the front/back camera switch goes to the phone over `adb` (an exported `ControlReceiver`). The phone's `MainActivity` no longer forces `screenOrientation` and declares `configChanges`, so physically rotating the phone neither rotates the app against the system setting nor recreates the Activity mid-stream.
 
 ## Build split: Linux vs Windows
 
-- **On Linux (the whole phone app):** Android Studio, Gradle, SDK/NDK, ADB, emulator, APK signing — all native. Capture/encode/WebRTC is cross-platform and testable here.
-- **On Windows (a Win10/11 VM or spare box):** the receiver (MSVC + Windows SDK + FFmpeg + libdatachannel via vcpkg) and the optional audio driver (**WDK**). You cannot `regsvr32`, enumerate in Zoom, sign, or debug these from Linux. The DirectShow camera route needs **no signing**; only the kernel mic driver does.
+- **Phone app:** builds anywhere with Android Studio / Gradle (JDK 17). Capture/encode is standard Android.
+- **PC side:** the receiver (MSVC + Windows SDK + FFmpeg + libdatachannel via vcpkg) and the C# desktop app must build/run on **Windows** — you cannot `regsvr32`, enumerate in Zoom, or drive a DirectShow filter from Linux. The optional kernel mic driver needs the WDK.
 
 ## Decisions log
 
-- **WebRTC transport** — after RTSP/SRT MVPs, WebRTC (DTLS-SRTP) won on latency and native A/V sync. libdatachannel keeps the PC receiver self-contained (no full `libwebrtc` build).
-- **softcam (MIT)** as the camera sink — no signing, proven, tiny push API.
-- **Phone dials the PC** — the QR carries the PC's signaling endpoint + secret; the phone connects out, so the PC needs no inbound discovery and the phone can retry a saved endpoint.
-- **Audio via WASAPI render + virtual cable** — the receiver renders decoded audio to an ordinary output endpoint (`wasapi_sink.cpp`); pointing it at VB-CABLE's input makes it reappear as a capture device with no custom app↔driver IPC. Bonus: pointing it at real speakers gives a fully testable audio path.
+- **WebRTC for Wi-Fi** — after RTSP/SRT MVPs, WebRTC won on latency and native A/V sync; libdatachannel keeps the PC receiver self-contained.
+- **A separate scrcpy-style path for USB** — WebRTC-over-adb is impossible (UDP media, TCP tunnel, UDP-only PC ICE), so USB is MediaCodec/PCM over a framed TCP socket into the same sinks.
+- **softcam (MIT)** as the camera sink — no signing, tiny push API; output pinned to one resolution for stability.
+- **Audio via WASAPI render + VB-CABLE** — the receiver renders decoded audio to an output endpoint; VB-CABLE's input reappears as a capture device, so there's no custom app↔driver IPC. Pointing it at real speakers gives a fully testable audio path.
+- **Manual-only orientation** — the app never rotates/mirrors on its own.
 
 ## Open questions / risks
 
-- DirectShow camera invisible to the Windows Camera app and some UWP apps (acceptable for conferencing).
-- A full-tunnel VPN or AP-isolation can block the LAN-direct path (no relay fallback by design).
-- Custom kernel driver signing for any non-personal distribution — VB-CABLE avoids this for most users.
-- USB tethering as a future low-jitter transport (RNDIS gives ICE an interface to use).
+- DirectShow camera invisible to the built-in Windows *Camera* app and some UWP apps (fine for conferencing).
+- A full-tunnel VPN or AP-isolation blocks the Wi-Fi LAN-direct path (no relay fallback, by design) — USB sidesteps it.
+- Fixed 720p softcam caps output for users who select 1080p+ (webcam-standard, but plumbing the exact target through is a possible follow-up).
+- Custom kernel driver signing for non-personal distribution — VB-CABLE avoids this for most users.

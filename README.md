@@ -1,45 +1,71 @@
 # PhoneCam
 
-Use an Android phone as a webcam or low-latency microphone on Windows 10/11 over the local network.
+Use an Android phone as a **webcam and/or low-latency microphone** on Windows 10/11. Camera and mic show up as a normal **`PhoneCam Camera`** and (via a virtual audio cable) a normal microphone, so any app — Zoom, Teams, Meet, Discord, OBS, Chrome — can pick them.
 
-The media transport is **WebRTC** — Opus audio and H.264 camera over authenticated DTLS-SRTP, low-latency and LAN-direct. Camera and mic ride the same path. The earlier RTSP and SRT transports were retired once WebRTC video passed the real-device latency gate.
+The phone streams over one of two transports, chosen automatically:
+
+| Transport | When | Path |
+|---|---|---|
+| **USB** (preferred) | phone plugged in with USB debugging | scrcpy-style H.264 + PCM over an `adb forward` socket — no Wi-Fi, no QR, no tethering |
+| **Wi-Fi / WebRTC** | no cable | Opus + H.264 over authenticated **DTLS-SRTP**, LAN-direct, QR-paired |
+
+Both feed the **same** Windows decode → sink pipeline (FFmpeg → softcam / WASAPI). Everything is local: no cloud, no account, no STUN/TURN. The earlier RTSP and SRT transports were retired once WebRTC video passed the real-device latency gate.
 
 ## How it works
 
 ```
-Android phone                                   Windows PC
-Mic    → Opus  ─┐                              ┌→ FFmpeg → WASAPI  → CABLE Output    (mic)
-Camera → H.264 ─┴─ WebRTC / DTLS-SRTP ────────→┴→ FFmpeg → softcam → PhoneCam Camera
+Android phone                                          Windows PC (receiver.exe)
+                                                        ┌────────────────────────────────────────┐
+Camera ─ Camera2 → MediaCodec H.264 ─┐                  │ FFmpeg H.264 decode → BGR → rotate/flip │→ softcam  → "PhoneCam Camera"
+Mic    ─ AudioRecord → PCM ──────────┴─ USB: adb-fwd ──→│                                        │
+                                        TCP socket      │ raw PCM ─────────────────────────────► │→ WASAPI   → CABLE Output (mic)
+                                                        └────────────────────────────────────────┘
+
+Camera ─ org.webrtc H.264 ─┐                            ┌────────────────────────────────────────┐
+Mic    ─ org.webrtc Opus  ─┴─ Wi-Fi: DTLS-SRTP / UDP ──→│ libdatachannel → FFmpeg decode → sinks  │→ softcam / WASAPI
+                              (PCAM3 TCP signaling)      └────────────────────────────────────────┘
 ```
 
-The phone's mode (mic / camera / both) decides which tracks it sends; the low-latency WebRTC path carries whatever it offers. Pairing is local and QR-bootstrapped — no cloud signaling, STUN, or TURN service is used.
+The **phone's mode** (Cam+Mic / Camera / Mic) decides which tracks it sends; the receiver feeds whichever sink applies. The desktop app (`PhoneCam.exe`) is the launcher: it detects the phone, picks the transport, drives `adb`, shows the pairing QR when needed, and hosts a live preview.
 
-**Over USB** (with USB debugging on) PhoneCam takes a separate, even steadier path: a scrcpy-style stream — the phone encodes H.264 + PCM and sends it over an `adb forward` socket straight into the same FFmpeg → softcam / WASAPI sinks. The PC auto-detects the phone, starts it, and connects with no QR and no tethering; Wi-Fi/WebRTC is the fallback when no cable is present.
+### Manual image controls (never automatic)
+
+Mirror (L/R), flip (U/D), rotate (0/90/180/270), and front/back camera switch are all **user-driven buttons** in the desktop app, applied **live** while streaming (the app streams commands to `receiver.exe` over its stdin; the camera flip goes to the phone over `adb`). Nothing rotates or mirrors on its own — the raw sensor image is shown as-is until you change it.
 
 ## The two Windows sinks (why the mic is the hard part)
 
-| Sink | Windows mechanism | Code signing | Difficulty |
-|------|-------------------|--------------|------------|
-| **Virtual camera** | user-mode **DirectShow filter** (COM DLL, `regsvr32`) — [`tshino/softcam`](https://github.com/tshino/softcam) (MIT) | **none** | easy |
-| **Virtual microphone** | **kernel-mode audio driver** (WDM/PortCls WaveRT) — fork [`VirtualDrivers/Virtual-Audio-Driver`](https://github.com/VirtualDrivers/Virtual-Audio-Driver) (MIT) or MS `SysVAD` | **required** (test-signing for personal use; EV cert to distribute) | hard |
+| Sink | Windows mechanism | Code signing |
+|------|-------------------|--------------|
+| **Virtual camera** | user-mode **DirectShow filter** (COM DLL, `regsvr32`) — [`tshino/softcam`](https://github.com/tshino/softcam) (MIT) | **none** |
+| **Virtual microphone** | **kernel** audio endpoint — a pre-signed virtual cable ([VB-CABLE](https://vb-audio.com/Cable/)), or the optional driver in [`windows/driver/`](windows/driver) | required for a custom driver; VB-CABLE is already MS-signed |
 
-Windows 10 has **no user-mode way** to add a microphone — the audio engine only enumerates kernel capture endpoints. That's why the mic rides a virtual-audio endpoint (VB-CABLE, or the experimental kernel driver under `windows/driver/`) while the camera uses the simpler user-mode softcam filter.
+Windows has **no user-mode way** to add a microphone — the audio engine only enumerates kernel capture endpoints. So the receiver *renders* decoded phone audio to a WASAPI output; pointing that at VB-CABLE's input makes it reappear as **CABLE Output**, a selectable mic. The camera uses the simpler user-mode softcam filter, which outputs a **fixed resolution** (chosen once from the first frame) so the virtual camera never changes size mid-call.
+
+## Technology stack
+
+| Piece | Tech |
+|---|---|
+| Phone app | Kotlin, Camera2, MediaCodec (H.264), AudioRecord (PCM), a foreground `Service`; [`stream-webrtc-android`](https://github.com/GetStream/webrtc-android) (`org.webrtc`) for the Wi-Fi path; [ZXing](https://github.com/journeyapps/zxing-android-embedded) for QR scan |
+| PC receiver | C++ (MSVC); [libdatachannel](https://github.com/paullouisageneau/libdatachannel) (DTLS-SRTP + RTP, libjuice ICE, libsrtp/OpenSSL); FFmpeg 7.x (H.264/Opus **decode**, `swscale`, `swresample` — no `avformat`); WASAPI; DirectShow softcam |
+| Desktop app | C# / WinForms (`PhoneCam.exe`); bundled `adb`; [QRCoder](https://github.com/codebude/QRCoder) for the pairing QR |
+| Transports | WebRTC (DTLS-SRTP/Opus/H.264) over Wi-Fi; a custom framed TCP protocol over `adb forward` for USB |
+| Packaging | vcpkg (deps), CMake (receiver), Roslyn `csc` (GUI), Inno Setup (installer), GitHub Actions (`v*` tag → release) |
 
 ## Layout
 
 ```
 phonecam/
-├── android/     # the phone app — build on Linux with Android Studio / Gradle
-├── windows/     # the receiver + the experimental virtual-audio driver — build on Windows (MSVC + Windows SDK + WDK)
-└── docs/        # architecture, decisions, references
+├── android/     # the phone app — build on Linux/Mac/Windows with Android Studio / Gradle
+├── windows/     # the C++ receiver, the C# desktop app, packaging, and the optional audio driver
+└── docs/        # architecture + build/run
 ```
 
-## Prior art we lean on (all MIT/Apache — safe to fork)
+## Prior art we lean on
 
-- [`darusc/VCamdroid`](https://github.com/darusc/VCamdroid) (MIT) — closest end-to-end reference: Android → Windows softcam virtual camera.
-- [`stream-webrtc-android`](https://github.com/GetStream/webrtc-android) (BSD) — the prebuilt `org.webrtc` stack the phone uses for Opus/H.264 capture and DTLS-SRTP.
+- [`stream-webrtc-android`](https://github.com/GetStream/webrtc-android) (BSD) — the prebuilt `org.webrtc` stack the phone uses for Opus/H.264 capture and DTLS-SRTP over Wi-Fi.
+- [`libdatachannel`](https://github.com/paullouisageneau/libdatachannel) (MPL-2.0) — the PC WebRTC stack; keeps the receiver self-contained without a full `libwebrtc` build.
 - [`tshino/softcam`](https://github.com/tshino/softcam) (MIT) — DirectShow virtual camera with a tiny frame-push API.
+- [`scrcpy`](https://github.com/Genymobile/scrcpy) (Apache-2.0) — the reference for the USB path (MediaCodec → framed socket over `adb`).
+- [`darusc/VCamdroid`](https://github.com/darusc/VCamdroid) (MIT) — early end-to-end reference: Android → Windows softcam.
 
-See [docs/architecture.md](docs/architecture.md) for the full design and the research behind these choices.
-
-See [docs/build-and-run.md](docs/build-and-run.md) for how to run each side, and the subfolder READMEs for the `TODO` markers.
+See **[docs/architecture.md](docs/architecture.md)** for the design and the reasoning, and **[docs/build-and-run.md](docs/build-and-run.md)** for building and running each side.
