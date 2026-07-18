@@ -68,32 +68,43 @@ static void flipBgr(unsigned char *buf, int w, int h, bool fh, bool fv) {
 }
 
 bool VideoSink::ensure(const AVFrame *f) {
-    int cw = f->width & ~3;    // softcam wants width/height a multiple of 4
-    int ch = f->height & ~3;
+    // Fix the output geometry ONCE, from the first frame's aspect (short side -> 720). The virtual
+    // camera then keeps a stable resolution for the whole call (Zoom/Teams glitch on mid-call changes)
+    // and softcam is never recreated on the WebRTC resolution ramp — that churn was crashing us.
+    if (targetW_ == 0) {
+        if (f->width >= f->height) { targetH_ = 720; targetW_ = ((720 * f->width  / f->height) + 2) & ~3; }
+        else                       { targetW_ = 720; targetH_ = ((720 * f->height / f->width)  + 2) & ~3; }
+    }
+
+    // Scaler: (re)build only when the SOURCE resolution changes (the ramp). dst_ is the fixed target.
+    if (!sws_ || srcW_ != f->width || srcH_ != f->height) {
+        sws_freeContext(sws_);
+        srcW_ = f->width; srcH_ = f->height;
+        sws_ = sws_getContext(f->width, f->height, (AVPixelFormat)f->format,
+                              targetW_, targetH_, AV_PIX_FMT_BGR24, SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (!sws_) return false;
+        if (!dst_[0] && av_image_alloc(dst_, dstLinesize_, targetW_, targetH_, AV_PIX_FMT_BGR24, 1) < 0) return false;
+        fprintf(stderr, "[video] source %dx%d -> %dx%d\n", f->width, f->height, targetW_, targetH_);
+    }
+
+    // Softcam + output buffer: (re)build only when the OUTPUT geometry changes — the first frame or a
+    // manual rotation that swaps W/H. NEVER on the ramp.
     int rot = g_rotate.load();
-    if (sws_ && w_ == cw && h_ == ch && rot_ == rot) return true;
-
-    sws_freeContext(sws_);
-    av_freep(&dst_[0]);
+    int now = (rot == 90 || rot == 270) ? targetH_ : targetW_;
+    int noh = (rot == 90 || rot == 270) ? targetW_ : targetH_;
+    if (ow_ != now || oh_ != noh || rot_ != rot) {
+        bool geomChanged = (ow_ != now || oh_ != noh);
+        rot_ = rot; ow_ = now; oh_ = noh;
+        if (geomChanged) {
+            obuf_.resize((size_t)ow_ * oh_ * 3);
 #ifdef HAVE_SOFTCAM
-    if (cam_) { softcam::sender::DeleteCamera(cam_); cam_ = nullptr; }
+            if (cam_) { softcam::sender::DeleteCamera(cam_); cam_ = nullptr; }
+            cam_ = softcam::sender::CreateCamera(ow_, oh_, (float)fps_);
+            if (!cam_) fprintf(stderr, "scCreateCamera(%d,%d,%.1f) failed — another softcam instance?\n", ow_, oh_, fps_);
 #endif
-
-    w_ = cw; h_ = ch; rot_ = rot;
-    // Output (post-rotation) dims: 90/270 swap width and height.
-    ow_ = (rot == 90 || rot == 270) ? ch : cw;
-    oh_ = (rot == 90 || rot == 270) ? cw : ch;
-    sws_ = sws_getContext(f->width, f->height, (AVPixelFormat)f->format,
-                          cw, ch, AV_PIX_FMT_BGR24, SWS_BILINEAR, nullptr, nullptr, nullptr);
-    if (!sws_) return false;
-    if (av_image_alloc(dst_, dstLinesize_, cw, ch, AV_PIX_FMT_BGR24, 1) < 0) return false;
-    obuf_.resize((size_t)ow_ * oh_ * 3);   // always — a live flip can turn on without a rotation change
-
-#ifdef HAVE_SOFTCAM
-    cam_ = softcam::sender::CreateCamera(ow_, oh_, (float)fps_);
-    if (!cam_) fprintf(stderr, "scCreateCamera(%d,%d,%.1f) failed — another softcam instance?\n", ow_, oh_, fps_);
-#endif
-    fprintf(stderr, "[video] %dx%d @ %.1f fps%s\n", ow_, oh_, fps_, rot ? " (rotated)" : "");
+            fprintf(stderr, "[video] output %dx%d @ %.1f fps%s\n", ow_, oh_, fps_, rot ? " (rotated)" : "");
+        }
+    }
     return true;
 }
 
@@ -109,10 +120,10 @@ bool VideoSink::WriteFrame(const AVFrame *frame) {
     // Apply the manual rotate + mirror (never automatic). Passthrough when nothing is set.
     bool fh = g_flipH.load(), fv = g_flipV.load();
     const unsigned char *outbuf; int outw, outh;
-    if (rot_ == 0 && !fh && !fv) { outbuf = dst_[0]; outw = w_; outh = h_; }
+    if (rot_ == 0 && !fh && !fv) { outbuf = dst_[0]; outw = targetW_; outh = targetH_; }
     else {
-        if (rot_ == 0) std::memcpy(obuf_.data(), dst_[0], (size_t)w_ * h_ * 3);
-        else rotateBgr(dst_[0], w_, h_, rot_, obuf_.data());
+        if (rot_ == 0) std::memcpy(obuf_.data(), dst_[0], (size_t)targetW_ * targetH_ * 3);
+        else rotateBgr(dst_[0], targetW_, targetH_, rot_, obuf_.data());
         if (fh || fv) flipBgr(obuf_.data(), ow_, oh_, fh, fv);
         outbuf = obuf_.data(); outw = ow_; outh = oh_;
     }
@@ -154,5 +165,5 @@ void VideoSink::Stop() {
 #ifdef HAVE_SOFTCAM
     if (cam_) { softcam::sender::DeleteCamera(cam_); cam_ = nullptr; }
 #endif
-    w_ = h_ = 0;
+    srcW_ = srcH_ = targetW_ = targetH_ = ow_ = oh_ = rot_ = 0;
 }

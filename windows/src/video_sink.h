@@ -28,8 +28,8 @@ public:
     void Stop();
 
     long frames() const { return frames_; }
-    int  width() const { return w_; }
-    int  height() const { return h_; }
+    int  width() const { return ow_; }
+    int  height() const { return oh_; }
 
 private:
     bool ensure(const AVFrame *f);
@@ -40,8 +40,9 @@ private:
     SwsContext *sws_ = nullptr;
     unsigned char *dst_[4] = {nullptr, nullptr, nullptr, nullptr};
     int         dstLinesize_[4] = {0, 0, 0, 0};
-    int         w_ = 0, h_ = 0;                 // swscale output (decoded) dims
-    int         rot_ = 0, ow_ = 0, oh_ = 0;     // rotation + output dims currently in effect
+    int         srcW_ = 0, srcH_ = 0;           // last source (decoded) size — drives the sws rebuild on the ramp
+    int         targetW_ = 0, targetH_ = 0;     // FIXED scaler output, chosen once from the first frame
+    int         rot_ = 0, ow_ = 0, oh_ = 0;     // rotation + softcam/preview output dims (target, rotated)
     std::vector<unsigned char> obuf_;           // transformed BGR (used when any rotate/flip is active)
     void       *cam_ = nullptr;   // softcam handle (void* to keep the header softcam-free)
     long        frames_ = 0;
