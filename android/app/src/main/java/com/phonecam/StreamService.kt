@@ -42,6 +42,9 @@ class StreamService : Service() {
         const val ACTION_SWITCH_CAMERA = "com.phonecam.action.SWITCH_CAMERA"
         const val EXTRA_MODE = "mode"
         const val EXTRA_QUALITY = "quality"
+        // Opt-in "clean mic": capture without the platform voice AEC/NS (the phone is a standalone
+        // remote mic — it has nothing to echo-cancel). Default false keeps AEC/NS. (F-12)
+        const val EXTRA_RAW_MIC = "rawMic"
         // Transport: "webrtc" (default, Wi-Fi) or "usb" (scrcpy-style H.264/PCM over an adb-forwarded socket).
         const val EXTRA_TRANSPORT = "transport"
         // WebRTC signaling target (from the PC's PCAM3 QR).
@@ -118,16 +121,17 @@ class StreamService : Service() {
         val quality = intent?.getStringExtra(EXTRA_QUALITY)?.let { runCatching { Quality.valueOf(it) }.getOrNull() }
             ?: DEFAULT_QUALITY
         val transport = intent?.getStringExtra(EXTRA_TRANSPORT) ?: "webrtc"
+        val rawMic = intent?.getBooleanExtra(EXTRA_RAW_MIC, false) ?: false
 
         startForegroundForMode(mode)
         if (transport == "usb") {
             val usbPort = intent?.getIntExtra(EXTRA_USB_PORT, DEFAULT_USB_PORT) ?: DEFAULT_USB_PORT
-            startUsbStreaming(mode, quality, usbPort)
+            startUsbStreaming(mode, quality, usbPort, rawMic)
         } else {
             val sigHost = intent?.getStringExtra(EXTRA_SIG_HOST)
             val sigPort = intent?.getIntExtra(EXTRA_SIG_PORT, 0) ?: 0
             val sigSecret = intent?.getStringExtra(EXTRA_SIG_SECRET)
-            startStreaming(mode, quality, sigHost, sigPort, sigSecret)
+            startStreaming(mode, quality, sigHost, sigPort, sigSecret, rawMic)
         }
         return START_STICKY
     }
@@ -137,12 +141,12 @@ class StreamService : Service() {
      * reaches it through `adb forward` (no WebRTC, no tethering). "connected" comes from the socket
      * accept. All the media work is in [UsbStreamer].
      */
-    private fun startUsbStreaming(mode: Mode, quality: Quality, port: Int) {
+    private fun startUsbStreaming(mode: Mode, quality: Quality, port: Int, rawMic: Boolean) {
         if (isRunning) return
         clientConnected = false; everConnected = false
         try {
             val streamer = UsbStreamer(applicationContext, port,
-                mode != Mode.MIC_ONLY, mode != Mode.CAMERA_ONLY, quality.w, quality.h, quality.fps) { connected ->
+                mode != Mode.MIC_ONLY, mode != Mode.CAMERA_ONLY, quality.w, quality.h, quality.fps, rawMic) { connected ->
                 clientConnected = connected
                 if (connected) everConnected = true
                 lastClientMs = SystemClock.elapsedRealtime()
@@ -172,7 +176,7 @@ class StreamService : Service() {
      * (the PC pressed Stop) surfaces as DISCONNECTED and stops us at once.
      */
     private fun startStreaming(mode: Mode, quality: Quality,
-                               sigHost: String?, sigPort: Int, sigSecret: String?) {
+                               sigHost: String?, sigPort: Int, sigSecret: String?, rawMic: Boolean) {
         if (isRunning) return
         clientConnected = false; everConnected = false
 
@@ -182,7 +186,7 @@ class StreamService : Service() {
         }
         try {
             val sender = WebRtcSender(applicationContext, sigHost, sigPort, sigSecret,
-                mode != Mode.MIC_ONLY, mode != Mode.CAMERA_ONLY, quality.w, quality.h, quality.fps) { state ->
+                mode != Mode.MIC_ONLY, mode != Mode.CAMERA_ONLY, quality.w, quality.h, quality.fps, rawMic) { state ->
                 when (state) {
                     WebRtcSender.State.CONNECTED -> {
                         clientConnected = true; everConnected = true

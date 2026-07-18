@@ -15,6 +15,13 @@ android {
         targetSdk = 34
         versionCode = 37
         versionName = "0.5.4"
+
+        ndk {
+            // Ship only ARM ABIs: the org.webrtc native lib is large and x86/x86_64 are emulator-only
+            // for a phone-camera app, so this ~halves the APK. Drop this filter (or add an emulator
+            // flavor) if you need to run on an x86/x86_64 Android emulator. (F-20)
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     // Release signing: CI decodes the keystore secret to a file and points these env vars at it,

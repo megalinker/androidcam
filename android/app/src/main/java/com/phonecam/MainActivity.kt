@@ -49,6 +49,7 @@ class MainActivity : AppCompatActivity() {
     private var pendingWebrtc: WebrtcTarget? = null
     // A USB request pushed by the PC over adb (port, mode, quality), held across the permission prompt.
     private var pendingUsb: Triple<Int, String?, String?>? = null
+    private var pendingRawMic = false   // raw-mic (no AEC/NS) flag from the PC's USB launch intent (F-12)
     private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
         result.contents?.let { onScanned(it) }
     }
@@ -105,6 +106,7 @@ class MainActivity : AppCompatActivity() {
             intent.getIntExtra(StreamService.EXTRA_USB_PORT, StreamService.DEFAULT_USB_PORT),
             intent.getStringExtra(KEY_MODE),
             intent.getStringExtra(KEY_QUALITY))
+        pendingRawMic = intent.getBooleanExtra(StreamService.EXTRA_RAW_MIC, false)
         if (ensurePermissions()) beginUsb()
     }
 
@@ -129,6 +131,7 @@ class MainActivity : AppCompatActivity() {
             putExtra(StreamService.EXTRA_USB_PORT, port)
             putExtra(StreamService.EXTRA_MODE, selectedMode().name)
             putExtra(StreamService.EXTRA_QUALITY, selectedQuality().name)
+            putExtra(StreamService.EXTRA_RAW_MIC, pendingRawMic)
         }
         ContextCompat.startForegroundService(this, svc)
         Toast.makeText(this, "USB — streaming to the PC…", Toast.LENGTH_SHORT).show()

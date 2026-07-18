@@ -53,6 +53,7 @@ class WebRtcSender(
     private val videoW: Int,
     private val videoH: Int,
     private val videoFps: Int,
+    private val rawMic: Boolean = false,        // true = disable HW AEC/NS (clean remote mic) (F-12)
     private val onState: (State) -> Unit,
 ) {
     enum class State { CONNECTING, CONNECTED, DISCONNECTED, FAILED }
@@ -92,10 +93,11 @@ class WebRtcSender(
     private fun run() {
         ensureFactoryInit(appCtx)
 
-        // Mic capture with the platform AEC/NS (this is a voice mic, not music).
+        // Mic capture. Default: platform AEC/NS (voice mic). rawMic mode disables them — the phone is a
+        // standalone remote mic with no local playback to echo-cancel, so AEC is dead weight. (F-12)
         adm = JavaAudioDeviceModule.builder(appCtx)
-            .setUseHardwareAcousticEchoCanceler(true)
-            .setUseHardwareNoiseSuppressor(true)
+            .setUseHardwareAcousticEchoCanceler(!rawMic)
+            .setUseHardwareNoiseSuppressor(!rawMic)
             .createAudioDeviceModule()
         // Hardware H.264 (via MediaCodec) so the PC's H264 offer has a matching encoder; the EGL
         // context is shared with the camera capture path. VP8/VP9 stay enabled as fallback.
@@ -225,11 +227,16 @@ class WebRtcSender(
         val vtrack = factory!!.createVideoTrack("cam0", vsrc).apply { setEnabled(true) }
         videoTrack = vtrack
         val sender = peer.addTrack(vtrack, listOf("pcam"))
-        // Low-latency intent: on a weak link keep motion smooth and let WebRTC shed resolution
-        // rather than framerate. Best-effort — falls back to WebRTC's default if the API differs.
+        // Low-latency intent: on a weak link keep motion smooth and let WebRTC shed resolution rather
+        // than framerate. Also cut the initial low-res ramp by raising the congestion controller's start
+        // estimate and capping max; min is left unset so a weak link can still shed bitrate and never
+        // starve audio. Best-effort — falls back to WebRTC's defaults if the API differs. (F-13)
         runCatching {
+            val maxBps = (videoW.toLong() * videoH * videoFps / 8).toInt().coerceIn(2_000_000, 20_000_000)
+            peer.setBitrate(null, 2_000_000, maxBps)   // (min, start, max) — bump the BWE start estimate
             val p = sender.parameters
             p.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
+            p.encodings.firstOrNull()?.let { it.maxBitrateBps = maxBps }
             sender.parameters = p
         }
         Log.i(TAG, "webrtc: camera track added ($camName, ${videoW}x${videoH}@${videoFps})")

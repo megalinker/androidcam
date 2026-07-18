@@ -51,6 +51,7 @@ class UsbStreamer(
     private val videoW: Int,
     private val videoH: Int,
     private val videoFps: Int,
+    private val rawMic: Boolean = false,        // true = capture without platform AEC/NS (F-12)
     private val onClient: (Boolean) -> Unit,   // true once a PC connects, false when it drops
 ) {
     private val closed = AtomicBoolean(false)
@@ -161,13 +162,15 @@ class UsbStreamer(
             // Low-latency levers (best-effort; ignored where unsupported).
             runCatching { setInteger(MediaFormat.KEY_LATENCY, 1) }
             runCatching { setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0) }
+            runCatching { setInteger(MediaFormat.KEY_PRIORITY, 0) }   // 0 = realtime; scheduling hint (F-15)
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R)
                 runCatching { setInteger(MediaFormat.KEY_LOW_LATENCY, 1) }
         }
         val enc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         // The callback writes encoded frames to the socket, so it must run on a background thread —
         // MediaCodec would otherwise dispatch it on the main looper (NetworkOnMainThreadException).
-        val et = HandlerThread("usb-enc").apply { start() }
+        // Raised priority so encode-output + socket writes aren't preempted by best-effort work (F-16).
+        val et = HandlerThread("usb-enc", android.os.Process.THREAD_PRIORITY_DISPLAY).apply { start() }
         encThread = et
         enc.setCallback(object : MediaCodec.Callback() {
             override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {}   // Surface input: none
@@ -221,13 +224,23 @@ class UsbStreamer(
                         val req = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                             addTarget(surface)
                             set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, android.util.Range(videoFps, videoFps))
+                            // Turn off electronic image stabilization: it buffers/warps frames and adds
+                            // latency, at odds with the low-latency USB path (F-17). Best-effort.
+                            runCatching { set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF) }
                         }
                         val ok = runCatching { session.setRepeatingRequest(req.build(), null, h) }.isSuccess
                         if (!ok) {
-                            val plain = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply { addTarget(surface) }
+                            val plain = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                                addTarget(surface)
+                                runCatching { set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF) }
+                            }
                             runCatching { session.setRepeatingRequest(plain.build(), null, h) }
                                 .onFailure { Log.e(TAG, "usb: setRepeatingRequest failed", it) }
                         }
+                        // Force the next encoded frame to be an IDR so a lens switch starts clean rather
+                        // than coding the very different new image against stale references (~1s of
+                        // artifacts otherwise). Harmless on the initial open (its first frame is an IDR). (F-10)
+                        runCatching { encoder?.setParameters(android.os.Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) }) }
                         Log.i(TAG, "usb: camera streaming ${videoW}x${videoH}@${videoFps}")
                     }
                     override fun onConfigureFailed(session: CameraCaptureSession) {
@@ -283,13 +296,16 @@ class UsbStreamer(
             Log.e(TAG, "usb: no mic permission"); return
         }
         audioThread = Thread {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)   // real-time capture (F-16)
             var rec: AudioRecord? = null
             try {
                 val minBuf = AudioRecord.getMinBufferSize(
                     AUDIO_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
                 val bufSize = maxOf(minBuf, AUDIO_RATE / 25 * 2)   // ~40ms floor
-                rec = AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,   // platform AEC/NS, like the WebRTC path
+                // MIC = raw capture, no platform AEC/NS (clean/full-band remote mic); VOICE_COMMUNICATION
+                // = platform AEC/NS (default, like the WebRTC path). See F-12.
+                val src = if (rawMic) MediaRecorder.AudioSource.MIC else MediaRecorder.AudioSource.VOICE_COMMUNICATION
+                rec = AudioRecord(src,
                     AUDIO_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize)
                 if (rec.state != AudioRecord.STATE_INITIALIZED) { Log.e(TAG, "usb: AudioRecord init failed"); return@Thread }
                 rec.startRecording()
