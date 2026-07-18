@@ -33,8 +33,9 @@ public class PhoneCamGui : Form
     static readonly Color Card = Color.FromArgb(42, 45, 51);
     static readonly Color Line = Color.FromArgb(52, 55, 62);
     static readonly Color Fg = Color.FromArgb(234, 236, 239);
-    static readonly Color Sub = Color.FromArgb(138, 143, 150);
+    static readonly Color Sub = Color.FromArgb(158, 163, 170);   // secondary text — bumped for WCAG AA on Bg
     static readonly Color Accent = Color.FromArgb(72, 125, 232);
+    static readonly Color AccentText = Color.FromArgb(95, 150, 240);   // Accent as TEXT (link) — passes AA (Accent fill fails as text)
     static readonly Color Green = Color.FromArgb(72, 190, 128);
     static readonly Color Amber = Color.FromArgb(226, 170, 74);
 
@@ -81,6 +82,7 @@ public class PhoneCamGui : Form
     PictureBox qrBox;
     volatile float micLevel = 0f;   // 0..1 peak from the receiver's [level] lines, drives the mic meter
     NotifyIcon tray;
+    ToolTip tips;   // hover help for the audio + image controls
     bool minimizeToTray = false;
     bool startMinimized = false;    // launched with -tray (autostart) → start hidden in the tray
     bool autoListen = true;         // on launch, auto-start the WebRTC listener so the phone reconnects with one tap (no PC clicks)
@@ -91,7 +93,7 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, settingsPath, logPath;
-    const string Version = "0.5.4";
+    const string Version = "0.6.0";
     const int WebrtcSigPort = 8891;   // TCP port the PC's WebRTC PCAM3 signaling listener binds
     const int UsbPort = 27183;        // loopback port we adb-forward to the phone's USB stream socket
     string adbExe;                    // bundled/system adb, or null — drives the USB path
@@ -128,6 +130,7 @@ public class PhoneCamGui : Form
         logPath = Path.Combine(lad, "PhoneCam", "phonecam.log");
         try { Directory.CreateDirectory(Path.GetDirectoryName(logPath)); File.WriteAllText(logPath, ""); } catch { }  // fresh log per session
         BuildUi();
+        try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }   // app icon (embedded via /win32icon) for title bar + tray
         LoadSettings();
         BuildTray();
         Log("PhoneCam v" + Version + " started. receiver=" + (receiverExe ?? "NOT FOUND"));
@@ -153,98 +156,111 @@ public class PhoneCamGui : Form
         Text = "PhoneCam v" + Version;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(744, 560);
+        ClientSize = new Size(744, 600);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Bg; ForeColor = Fg;
         Font = new Font("Segoe UI", 9.5f);
 
-        // Left control column
-        var title = new Label { Text = "PhoneCam", Font = new Font("Segoe UI Semibold", 17f), ForeColor = Fg, Location = new Point(20, 18), AutoSize = true };
+        // Header
+        var title = new Label { Text = "PhoneCam", Font = new Font("Segoe UI Semibold", 17f), ForeColor = Fg, Location = new Point(24, 18), AutoSize = true };
         Controls.Add(title);
-        Controls.Add(new Label { Text = "v" + Version, ForeColor = Sub, Font = new Font("Segoe UI", 9f), Location = new Point(158, 32), AutoSize = true });
+        Controls.Add(new Label { Text = "v" + Version, ForeColor = Sub, Font = new Font("Segoe UI", 9f), Location = new Point(152, 33), AutoSize = true });
 
-        AddSection("Connect", 72);
-        Controls.Add(new Label { Text = "Wi-Fi — scan the QR shown here with the PhoneCam app.\nKeep the phone and PC on the same network.",
-            ForeColor = Sub, Location = new Point(24, 106), AutoSize = true, MaximumSize = new Size(224, 0) });
-
-        AddSection("Options", 198);
-        cbMic = Check("Use microphone", 22, 222);
-        cbBoost = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(150, 219), Width = 96, FlatStyle = FlatStyle.Flat, BackColor = Card, ForeColor = Fg };
-        cbBoost.Items.AddRange(new object[] { "Boost: Off", "Boost: Low", "Boost: Med", "Boost: High" });
-        cbBoost.SelectedIndex = 2;   // Medium (~+12 dB) by default — phone mics are quiet
-        cbEq = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(150, 247), Width = 96, FlatStyle = FlatStyle.Flat, BackColor = Card, ForeColor = Fg };
-        cbEq.Items.AddRange(new object[] { "EQ: Off", "EQ: Clarity", "EQ: Warm", "EQ: Bright", "EQ: Podcast",
-                                           "EQ: Clarity+", "EQ: Warm+", "EQ: Bright+", "EQ: Podcast+", "EQ: Custom…" });
-        cbEq.SelectedIndex = 0;
-        cbEq.SelectedIndexChanged += OnEqChanged;
-        // Opt-in raw mic: capture without the phone's echo-canceller (nothing to echo-cancel for a
-        // remote mic — usually clearer/fuller). Off by default. (F-12)
-        cbRawMic = Check("Raw mic (no AEC)", 22, 250);
-        cbMic.CheckedChanged += (s, e) => { cbBoost.Enabled = cbMic.Checked; cbEq.Enabled = cbMic.Checked; cbRawMic.Enabled = cbMic.Checked; };
-        cbBoost.Enabled = cbMic.Checked; cbEq.Enabled = cbMic.Checked; cbRawMic.Enabled = cbMic.Checked;
-        Controls.Add(cbMic); Controls.Add(cbBoost); Controls.Add(cbEq); Controls.Add(cbRawMic);
-
-        // Manual image controls — mirror / flip / rotate the camera. NEVER automatic; the user drives
-        // them, and they apply LIVE (sent to the running receiver) as well as at the next Start.
-        cbFlipH = Check("Mirror (L/R)", 22, 280);
-        cbFlipV = Check("Flip (U/D)", 130, 280);
-        cbFlipH.CheckedChanged += (s, e) => SendRecv("fliph " + (cbFlipH.Checked ? 1 : 0));
-        cbFlipV.CheckedChanged += (s, e) => SendRecv("flipv " + (cbFlipV.Checked ? 1 : 0));
-        cbRotate = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(22, 306), Width = 110, FlatStyle = FlatStyle.Flat, BackColor = Card, ForeColor = Fg };
-        cbRotate.Items.AddRange(new object[] { "Rotate: 0°", "Rotate: 90°", "Rotate: 180°", "Rotate: 270°" });
-        cbRotate.SelectedIndex = 0;
-        cbRotate.SelectedIndexChanged += (s, e) => SendRecv("rotate " + (cbRotate.SelectedIndex * 90));
-        btnSwitchCam = new Button { Text = "Switch camera", Location = new Point(150, 305), Size = new Size(96, 24), FlatStyle = FlatStyle.Flat, BackColor = Card, ForeColor = Fg, Font = new Font("Segoe UI", 8.25f) };
-        btnSwitchCam.FlatAppearance.BorderColor = Color.FromArgb(70, 74, 82);
-        btnSwitchCam.Click += (s, e) => SwitchPhoneCamera();
-        Controls.Add(cbFlipH); Controls.Add(cbFlipV); Controls.Add(cbRotate); Controls.Add(btnSwitchCam);
-
-        btnStart = new Button { Text = "Start", Location = new Point(22, 362), Size = new Size(224, 40), FlatStyle = FlatStyle.Flat, BackColor = Accent, ForeColor = Color.White, Font = new Font("Segoe UI Semibold", 11f) };
+        // CONNECT — with the primary action promoted right under it.
+        AddSection("Connect", 70);
+        Controls.Add(new Label { Text = "Open PhoneCam on your phone,\nscan the code on the right.",
+            ForeColor = Sub, Location = new Point(24, 94), AutoSize = true, MaximumSize = new Size(216, 0) });
+        btnStart = new Button { Text = "Connect", Location = new Point(24, 146), Size = new Size(216, 46), FlatStyle = FlatStyle.Flat, BackColor = Accent, ForeColor = Color.White, Font = new Font("Segoe UI Semibold", 11.5f) };
         btnStart.FlatAppearance.BorderSize = 0;
         btnStart.Click += OnStartStop;
         Controls.Add(btnStart);
 
-        lblDot = new Label { Text = "●", ForeColor = Sub, Location = new Point(24, 416), AutoSize = true, Font = new Font("Segoe UI", 11f) };
-        lblStatus = new Label { Text = "Idle", ForeColor = Sub, Location = new Point(44, 418), AutoSize = true, MaximumSize = new Size(210, 0) };
-        Controls.Add(lblDot); Controls.Add(lblStatus);
+        // AUDIO — the mic toggle up front, tuning beneath it.
+        AddSection("Audio", 214);
+        cbMic = Check("Use my phone's microphone", 24, 240);
+        cbBoost = new DarkComboBox(Card, Fg, Sub, Accent, Color.White, Line) { Location = new Point(24, 270), Width = 106 };
+        cbBoost.Items.AddRange(new object[] { "Boost: Off", "Boost: Low", "Boost: Med", "Boost: High" });
+        cbBoost.SelectedIndex = 2;   // Med (~+12 dB) by default — phone mics are quiet
+        cbEq = new DarkComboBox(Card, Fg, Sub, Accent, Color.White, Line) { Location = new Point(134, 270), Width = 106 };
+        cbEq.Items.AddRange(new object[] { "Voice: Off", "Voice: Clearer", "Voice: Warmer", "Voice: Brighter", "Voice: Podcast",
+                                           "Voice: Clearer+", "Voice: Warmer+", "Voice: Brighter+", "Voice: Podcast+", "Voice: Custom…" });
+        cbEq.SelectedIndex = 0;
+        cbEq.SelectedIndexChanged += OnEqChanged;
+        cbRawMic = Check("Phone-call noise filter", 24, 302);   // OFF by default = the fuller, natural (raw) mic; check it to clean up a noisy room
+        cbMic.CheckedChanged += (s, e) => { cbBoost.Enabled = cbMic.Checked; cbEq.Enabled = cbMic.Checked; cbRawMic.Enabled = cbMic.Checked; };
+        cbBoost.Enabled = cbMic.Checked; cbEq.Enabled = cbMic.Checked; cbRawMic.Enabled = cbMic.Checked;
+        Controls.Add(cbMic); Controls.Add(cbBoost); Controls.Add(cbEq); Controls.Add(cbRawMic);
 
-        // Live mic level meter (visible only while the mic is streaming).
-        micLabel = new Label { Text = "Mic", ForeColor = Sub, Location = new Point(24, 446), AutoSize = true, Font = new Font("Segoe UI", 8.25f), Visible = false };
-        micMeter = new Panel { Location = new Point(56, 446), Size = new Size(184, 14), BackColor = Color.FromArgb(20, 22, 25), Visible = false };
+        // IMAGE — a tidy 2x2 toolbar. Manual + applied LIVE (sent to the running receiver). NEVER automatic.
+        AddSection("Image", 340);
+        cbFlipH = Toggle("Mirror ↔", 24, 364);
+        cbFlipV = Toggle("Flip ↕", 136, 364);
+        cbFlipH.CheckedChanged += (s, e) => SendRecv("fliph " + (cbFlipH.Checked ? 1 : 0));
+        cbFlipV.CheckedChanged += (s, e) => SendRecv("flipv " + (cbFlipV.Checked ? 1 : 0));
+        cbRotate = new DarkComboBox(Card, Fg, Sub, Accent, Color.White, Line) { Location = new Point(24, 396), Width = 104 };
+        cbRotate.Items.AddRange(new object[] { "Rotate: 0°", "Rotate: 90°", "Rotate: 180°", "Rotate: 270°" });
+        cbRotate.SelectedIndex = 0;
+        cbRotate.SelectedIndexChanged += (s, e) => SendRecv("rotate " + (cbRotate.SelectedIndex * 90));
+        btnSwitchCam = new Button { Text = "Switch camera", Location = new Point(136, 395), Size = new Size(104, 26), FlatStyle = FlatStyle.Flat, BackColor = Card, ForeColor = Fg, Font = new Font("Segoe UI", 8.5f) };
+        btnSwitchCam.FlatAppearance.BorderColor = Color.FromArgb(70, 74, 82);
+        btnSwitchCam.Click += (s, e) => SwitchPhoneCamera();
+        Controls.Add(cbFlipH); Controls.Add(cbFlipV); Controls.Add(cbRotate); Controls.Add(btnSwitchCam);
+
+        // Hover help — explains the non-obvious controls without cluttering the labels.
+        tips = new ToolTip { AutoPopDelay = 9000, InitialDelay = 400, ReshowDelay = 100 };
+        tips.SetToolTip(cbRawMic, "On: cleans up background noise like a phone call — good for a noisy room, but your voice sounds a bit thinner.\nOff (default): fuller, more natural voice.");
+        tips.SetToolTip(cbBoost, "Make the (usually quiet) phone microphone louder.");
+        tips.SetToolTip(cbEq, "Quick voice-tone presets — a touch of extra clarity or warmth.");
+        tips.SetToolTip(cbFlipH, "Flip the image left ↔ right (a mirror).");
+        tips.SetToolTip(cbFlipV, "Flip the image top ↕ bottom (upside-down).");
+        tips.SetToolTip(btnSwitchCam, "Switch between the phone's front and back camera.");
+
+        // STATUS — live state, mic meter, and the "pick me in your call app" tip.
+        AddSection("Status", 436);
+        lblDot = new Label { Text = "●", ForeColor = Sub, Location = new Point(24, 462), AutoSize = true, Font = new Font("Segoe UI", 11f) };
+        lblStatus = new Label { Text = "Not connected", ForeColor = Sub, Location = new Point(44, 464), AutoSize = true, MaximumSize = new Size(196, 0) };
+        Controls.Add(lblDot); Controls.Add(lblStatus);
+        micLabel = new Label { Text = "Mic", ForeColor = Sub, Location = new Point(24, 494), AutoSize = true, Font = new Font("Segoe UI", 8.25f), Visible = false };
+        micMeter = new Panel { Location = new Point(56, 494), Size = new Size(184, 14), BackColor = Color.FromArgb(20, 22, 25), Visible = false };
         micMeter.Paint += PaintMeter;
         Controls.Add(micLabel); Controls.Add(micMeter);
-
-        tip = new Label { Text = TipText(false), ForeColor = Sub, Location = new Point(22, 474), AutoSize = true, MaximumSize = new Size(236, 0) };
+        tip = new Label { Text = TipText(false), ForeColor = Sub, Location = new Point(24, 518), AutoSize = true, MaximumSize = new Size(216, 0) };
         Controls.Add(tip);
-
-        linkDiag = new LinkLabel { Text = "Copy diagnostics", Location = new Point(22, 522), AutoSize = true, LinkColor = Accent, ActiveLinkColor = Accent, LinkBehavior = LinkBehavior.AlwaysUnderline, Font = new Font("Segoe UI", 9f) };
+        linkDiag = new LinkLabel { Text = "Copy troubleshooting info", Location = new Point(24, 568), AutoSize = true, LinkColor = AccentText, ActiveLinkColor = AccentText, DisabledLinkColor = Sub, LinkBehavior = LinkBehavior.AlwaysUnderline, Font = new Font("Segoe UI", 9f) };
         linkDiag.LinkClicked += (s, e) => CopyDiagnostics();
         Controls.Add(linkDiag);
 
         // Right: embedded live preview (also hosts the pairing QR before a phone connects)
-        preview = new Panel { Location = new Point(260, 84), Size = new Size(468, 446), BackColor = Color.FromArgb(12, 13, 15), BorderStyle = BorderStyle.None };
+        preview = new Panel { Location = new Point(260, 84), Size = new Size(468, 486), BackColor = Color.FromArgb(12, 13, 15), BorderStyle = BorderStyle.None };
         preview.Paint += (s, e) => { using (var pen = new Pen(Line)) e.Graphics.DrawRectangle(pen, 0, 0, preview.Width - 1, preview.Height - 1); };
-        previewHint = new Label { Text = "Live preview appears here once you press Start.", ForeColor = Sub, BackColor = Color.FromArgb(12, 13, 15), AutoSize = true, Location = new Point(16, 16) };
-        // Centered as one vertical group inside the 468×392 preview panel: the QR block itself
-        // sits at the panel's vertical centre, with the caption just above it.
-        qrLabel = new Label { Text = "Scan this with the PhoneCam phone app\n(tap “Scan PC QR to connect”)", ForeColor = Fg, BackColor = Color.FromArgb(12, 13, 15), Size = new Size(468, 40), Location = new Point(0, 34), TextAlign = ContentAlignment.MiddleCenter, Visible = false };
-        qrBox = new PictureBox { Location = new Point(104, 82), Size = new Size(260, 260), SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.White, Visible = false };
-        // Shown below the QR only if WebRTC stalls — the #1 cause is a VPN hiding the LAN.
-        vpnHint = new Label { Text = "Nothing yet? If you use a VPN, turn on “Allow LAN traffic” in it on\nBOTH this PC and the phone — a full tunnel hides local devices.",
-            ForeColor = Amber, BackColor = Color.FromArgb(12, 13, 15), Size = new Size(468, 46), Location = new Point(0, 356),
+        previewHint = new Label { Text = "Your phone's camera will show here once you connect.", ForeColor = Sub, BackColor = Color.FromArgb(12, 13, 15), AutoSize = true, Location = new Point(16, 16) };
+        qrLabel = new Label { Text = "Scan this code with the PhoneCam app on your phone.\nKeep your phone on the same Wi-Fi as this PC.", ForeColor = Fg, BackColor = Color.FromArgb(12, 13, 15), Size = new Size(468, 48), Location = new Point(0, 88), TextAlign = ContentAlignment.MiddleCenter, Visible = false };
+        qrBox = new PictureBox { Location = new Point(104, 150), Size = new Size(260, 260), SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.White, Visible = false };
+        vpnHint = new Label { Text = "Nothing yet? If you use a VPN, it may be hiding your phone.\nTurn the VPN off on the phone and PC, then try again.",
+            ForeColor = Amber, BackColor = Color.FromArgb(12, 13, 15), Size = new Size(468, 46), Location = new Point(0, 424),
             TextAlign = ContentAlignment.MiddleCenter, Font = new Font("Segoe UI", 8.5f), Visible = false };
         preview.Controls.Add(previewHint); preview.Controls.Add(qrLabel); preview.Controls.Add(qrBox); preview.Controls.Add(vpnHint);
         Controls.Add(preview);
 
-        if (receiverExe == null) { btnStart.Enabled = false; SetStatus(Color.IndianRed, "receiver.exe not found"); }
+        if (receiverExe == null) { btnStart.Enabled = false; SetStatus(Color.IndianRed, "PhoneCam is missing a file — please reinstall."); }
     }
 
     void AddSection(string t, int y)
     {
         Controls.Add(new Label { Text = t.ToUpperInvariant(), ForeColor = Sub, Font = new Font("Segoe UI", 7.5f, FontStyle.Bold), Location = new Point(24, y), AutoSize = true });
-        Controls.Add(new Panel { BackColor = Line, Location = new Point(24, y + 17), Size = new Size(212, 1) });
+        Controls.Add(new Panel { BackColor = Line, Location = new Point(24, y + 17), Size = new Size(216, 1) });
     }
-    CheckBox Check(string t, int x, int y) { return new CheckBox { Text = t, ForeColor = Fg, Location = new Point(x, y), AutoSize = true }; }
+    // Owner-drawn dark checkbox (white label + white check glyph on the dark form).
+    CheckBox Check(string t, int x, int y) { return new DarkCheckBox(Bg, Card, Fg, Sub, Accent, Line) { Text = t, Location = new Point(x, y), AutoSize = true }; }
+    // A live image-toolbar toggle: a flat button that lights up Accent when on.
+    CheckBox Toggle(string t, int x, int y)
+    {
+        var c = new CheckBox { Text = t, Appearance = Appearance.Button, TextAlign = ContentAlignment.MiddleCenter,
+            FlatStyle = FlatStyle.Flat, BackColor = Card, ForeColor = Fg, Location = new Point(x, y), Size = new Size(104, 26), Font = new Font("Segoe UI", 8.5f) };
+        c.FlatAppearance.BorderColor = Color.FromArgb(70, 74, 82);
+        c.FlatAppearance.CheckedBackColor = Accent;
+        return c;
+    }
 
     void SetStatus(Color c, string s) { lblDot.ForeColor = c; lblStatus.ForeColor = c == Sub ? Sub : Fg; lblStatus.Text = s; }
 
@@ -274,15 +290,15 @@ public class PhoneCamGui : Form
         miAuto.Click += (s, e) => SetAutostart(miAuto.Checked);
         var miTray = new ToolStripMenuItem("Minimize to tray") { CheckOnClick = true, Checked = minimizeToTray };
         miTray.Click += (s, e) => { minimizeToTray = miTray.Checked; SaveSettings(); };
-        var miListen = new ToolStripMenuItem("Auto-listen for my phone (WebRTC)") { CheckOnClick = true, Checked = autoListen };
+        var miListen = new ToolStripMenuItem("Stay ready for my phone to connect") { CheckOnClick = true, Checked = autoListen };
         miListen.Click += (s, e) => { autoListen = miListen.Checked; SaveSettings(); if (autoListen && !running && !reconnecting && !starting) StartAutoListen(); };
-        var stop = new ToolStripMenuItem("Stop streaming");
+        var stop = new ToolStripMenuItem("Disconnect");
         stop.Click += (s, e) => { if (running || reconnecting) { manualStop = true; StopReceiver(); } };
         var exit = new ToolStripMenuItem("Exit"); exit.Click += (s, e) => Close();
         menu.Items.Add(open); menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(miAuto); menu.Items.Add(miTray); menu.Items.Add(miListen); menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(stop); menu.Items.Add(exit);
-        tray = new NotifyIcon { Icon = SystemIcons.Application, Text = "PhoneCam", Visible = true, ContextMenuStrip = menu };
+        tray = new NotifyIcon { Icon = this.Icon ?? SystemIcons.Application, Text = "PhoneCam", Visible = true, ContextMenuStrip = menu };
         tray.DoubleClick += (s, e) => ShowFromTray();
     }
 
@@ -335,8 +351,8 @@ public class PhoneCamGui : Form
     static string TipText(bool mic)
     {
         return mic
-            ? "In your call app: “PhoneCam Camera” (camera) + “CABLE Output” (mic)."
-            : "Pick “PhoneCam Camera” as the webcam in Zoom / Teams / OBS.";
+            ? "In your video call app, pick “PhoneCam Camera” for video and “CABLE Output” for the mic."
+            : "In your video call app, pick “PhoneCam Camera” as the camera.";
     }
 
     // Options only take effect at Start, so lock them while streaming — otherwise ticking
@@ -409,7 +425,7 @@ public class PhoneCamGui : Form
             string setup = Path.Combine(ex, "VBCABLE_Setup_x64.exe");
             if (!File.Exists(setup)) { MessageBox.Show("Downloaded VB-CABLE but couldn't find its installer.", "PhoneCam"); return; }
             Process.Start(new ProcessStartInfo(setup) { UseShellExecute = true, Verb = "runas" });
-            MessageBox.Show("VB-CABLE (by VB-Audio) is opening. Click “Install Driver”, accept the Windows prompt,\nthen come back and press Start.", "PhoneCam — microphone setup");
+            MessageBox.Show("The microphone setup is opening. Click “Install Driver”, say Yes to the Windows prompt,\nthen come back and press Connect.", "PhoneCam — microphone setup");
         } catch (Exception e) {
             Cursor = Cursors.Default;
             if (MessageBox.Show("Couldn't fetch VB-CABLE automatically:\n" + e.Message + "\n\nOpen the VB-CABLE download page in your browser instead?", "PhoneCam", MessageBoxButtons.YesNo) == DialogResult.Yes)
@@ -453,7 +469,7 @@ public class PhoneCamGui : Form
     {
         if (!useMic || VbCableInstalled()) return true;
         var r = MessageBox.Show(
-            "Using the phone as a microphone needs the free VB-CABLE audio driver (by VB-Audio).\n\nDownload and install it now?",
+            "To use your phone as a microphone, PhoneCam needs to set up a small audio helper — a free, one-time install.\n\nInstall it now?",
             "PhoneCam — microphone setup", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
         if (r == DialogResult.Cancel) return false;
         if (r == DialogResult.Yes) { InstallVbCable(); return false; }  // install, then press Start again
@@ -467,7 +483,7 @@ public class PhoneCamGui : Form
         // during the multi-second adb window — `starting` (set synchronously here) does. (F-18)
         if (running || reconnecting || starting) return;
         bool useMic = cbMic.Checked;
-        bool rawMic = cbRawMic.Checked;   // captured on the UI thread (F-12)
+        bool rawMic = !cbRawMic.Checked;   // "Phone-call noise filter" OFF (unchecked) = raw/fuller mic. Captured on the UI thread. (F-12)
         if (!PrepareMic(ref useMic)) return;
         manualStop = false; reconnecting = false; wentLive = false; reconnectAttempts = 0;
         webrtcMode = false; usbMode = false;
@@ -649,7 +665,7 @@ public class PhoneCamGui : Form
         if (!webrtcMode) previewHint.Visible = true;   // WebRTC keeps the QR up until the phone connects
         tip.Text = TipText(useMic);
         SetInputsEnabled(false);
-        btnStart.Text = "Stop"; btnStart.BackColor = Color.FromArgb(70, 74, 82);
+        btnStart.Text = "Disconnect"; btnStart.BackColor = Color.FromArgb(70, 74, 82);
         timer.Start();
     }
 
@@ -870,19 +886,19 @@ public class PhoneCamGui : Form
         // The phone stopping mid-session leaves a frozen preview, so this must win over the "Live" checks.
         if (streamDropped)
             // In WebRTC mode the receiver keeps listening, so a drop means it is ready for the phone.
-            SetStatus(Amber, webrtcMode ? "Phone disconnected — ready to reconnect (tap “Reconnect” on the phone)."
-                                     : "Phone stopped — press Stop, or restart it on the phone.");
-        else if (hasVideo) SetStatus(Green, "Live — camera ready ✓");   // detail (“pick PhoneCam Camera”) is in the tip below
+            SetStatus(Amber, webrtcMode ? "Phone disconnected. Tap Reconnect in the app on your phone."
+                                     : "Phone stopped. Press Disconnect, or restart PhoneCam on your phone.");
+        else if (hasVideo) SetStatus(Green, "Connected — camera is live");   // detail (“pick PhoneCam Camera”) is in the tip below
         else if (audioSeen)
         {
             // Mic-only: there's no video window, so the video-based detection never fires. Audio is up.
-            SetStatus(Green, "Live — microphone ready ✓");
+            SetStatus(Green, "Connected — microphone is live");
             if (embedded == IntPtr.Zero) { previewHint.Text = "Microphone only — no video."; previewHint.Visible = true; }
         }
         else if (webrtcMode)
             SetStatus(Amber, "Waiting for the phone to connect…");
         else if (usbMode)
-            SetStatus(Amber, "USB — waiting for the phone…");
+            SetStatus(Amber, "Connecting over USB cable…");
     }
 
     /// <summary>Mask the session secret before anything reaches the log.</summary>
@@ -912,9 +928,9 @@ public class PhoneCamGui : Form
             if (vpnHint != null) vpnHint.Visible = false;
             SetInputsEnabled(true);
             tip.Text = TipText(false);
-            btnStart.Text = "Start"; btnStart.BackColor = Accent;
+            btnStart.Text = "Connect"; btnStart.BackColor = Accent;
             previewHint.Text = "Live preview appears here once you press Start."; previewHint.Visible = true;
-            if (lblStatus.Text != "Stopped") SetStatus(Sub, "Idle");
+            if (lblStatus.Text != "Stopped") SetStatus(Sub, "Not connected");
         }
     }
 
@@ -928,7 +944,7 @@ public class PhoneCamGui : Form
                 var kv = line.Split(new[] { '=' }, 2); if (kv.Length != 2) continue;
                 switch (kv[0]) {
                     case "mic": cbMic.Checked = kv[1] == "1"; break;
-                    case "rawmic": cbRawMic.Checked = kv[1] == "1"; break;
+                    case "callfilter": cbRawMic.Checked = kv[1] == "1"; break;
                     case "srtpass": pairSecret = kv[1]; break;   // migrate the secret from pre-0.5 settings
                     case "pairsecret": pairSecret = kv[1]; break;
                     case "autolisten": autoListen = kv[1] == "1"; break;
@@ -956,7 +972,7 @@ public class PhoneCamGui : Form
             Directory.CreateDirectory(Path.GetDirectoryName(settingsPath));
             var lines = new List<string> {
                 "mic=" + (cbMic.Checked ? "1" : "0"),
-                "rawmic=" + (cbRawMic.Checked ? "1" : "0"),
+                "callfilter=" + (cbRawMic.Checked ? "1" : "0"),
                 "pairsecret=" + pairSecret,
                 "boost=" + cbBoost.SelectedIndex,
                 "eqcustom=" + customEq,
@@ -1092,4 +1108,96 @@ public class EqEditorForm : Form
         string s = v != null ? v.ToString().Trim() : "";
         return s.Length == 0 ? dflt : s;
     }
+}
+
+// A DropDownList combo that is dark in EVERY part — closed box, drop arrow, and the dropdown LIST +
+// its items. Owner-draw is required because a themed ComboBox paints its list via the system list-box,
+// which ignores BackColor/ForeColor. (WinForms dark-theme fix.)
+public class DarkComboBox : ComboBox
+{
+    readonly Color _card, _fg, _sub, _accent, _accentText, _line;
+    public DarkComboBox(Color card, Color fg, Color sub, Color accent, Color accentText, Color line)
+    {
+        _card = card; _fg = fg; _sub = sub; _accent = accent; _accentText = accentText; _line = line;
+        DropDownStyle = ComboBoxStyle.DropDownList;
+        FlatStyle = FlatStyle.Flat;
+        DrawMode = DrawMode.OwnerDrawFixed;
+        BackColor = _card; ForeColor = _fg; ItemHeight = 20;
+    }
+    protected override void OnDrawItem(DrawItemEventArgs e)
+    {
+        if (e.Index < 0) { using (var b = new SolidBrush(_card)) e.Graphics.FillRectangle(b, e.Bounds); return; }
+        bool sel = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
+        Color back = sel ? _accent : _card;
+        Color fore = sel ? _accentText : (Enabled ? _fg : _sub);
+        using (var b = new SolidBrush(back)) e.Graphics.FillRectangle(b, e.Bounds);
+        TextRenderer.DrawText(e.Graphics, Convert.ToString(Items[e.Index]), e.Font,
+            new Rectangle(e.Bounds.X + 4, e.Bounds.Y, e.Bounds.Width - 4, e.Bounds.Height), fore,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+    }
+    const int WM_PAINT = 0x000F;
+    protected override void WndProc(ref Message m)
+    {
+        base.WndProc(ref m);
+        if (m.Msg == WM_PAINT)
+        {
+            using (var g = Graphics.FromHwnd(Handle))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                int aw = 18; var btn = new Rectangle(Width - aw, 0, aw, Height);
+                using (var b = new SolidBrush(_card)) g.FillRectangle(b, btn);
+                using (var pen = new Pen(_line)) g.DrawLine(pen, btn.Left, 4, btn.Left, Height - 5);
+                int cx = btn.Left + aw / 2, cy = Height / 2 - 1;
+                using (var pen = new Pen(Enabled ? _fg : _sub, 1.5f))
+                { g.DrawLine(pen, cx - 4, cy - 1, cx, cy + 3); g.DrawLine(pen, cx + 4, cy - 1, cx, cy + 3); }
+                using (var pen = new Pen(_line)) g.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+            }
+        }
+    }
+}
+
+// A fully owner-drawn checkbox: dark/Accent box, WHITE check + WHITE label. Owner-draw because a
+// visual-styles checkbox draws its label with the theme's (dark) text color and ignores ForeColor,
+// which is why the plain-CheckBox labels rendered black on the dark form.
+public class DarkCheckBox : CheckBox
+{
+    readonly Color _bg, _card, _fg, _sub, _accent, _line;
+    public DarkCheckBox(Color bg, Color card, Color fg, Color sub, Color accent, Color line)
+    {
+        _bg = bg; _card = card; _fg = fg; _sub = sub; _accent = accent; _line = line;
+        AutoSize = true; BackColor = _bg; ForeColor = _fg; FlatStyle = FlatStyle.Flat;
+        SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint |
+                 ControlStyles.SupportsTransparentBackColor | ControlStyles.ResizeRedraw, true);
+    }
+    const int BOX = 16, GAP = 8;
+    public override Size GetPreferredSize(Size proposed)
+    {
+        Size t = TextRenderer.MeasureText(Text, Font);
+        return new Size(BOX + GAP + t.Width + 2, Math.Max(t.Height, BOX) + 4);
+    }
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics; g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias; g.Clear(_bg);
+        int y = (Height - BOX) / 2; var box = new Rectangle(0, y, BOX, BOX);
+        Color fore = Enabled ? _fg : _sub;
+        if (Checked)
+        {
+            using (var b = new SolidBrush(Enabled ? _accent : _card)) g.FillRectangle(b, box);
+            using (var pen = new Pen(Enabled ? Color.White : _sub, 2f))
+                g.DrawLines(pen, new[] { new Point(box.Left + 3, box.Top + 8),
+                    new Point(box.Left + 6, box.Top + 11), new Point(box.Left + 12, box.Top + 4) });
+        }
+        else
+        {
+            using (var b = new SolidBrush(_card)) g.FillRectangle(b, box);
+            using (var pen = new Pen(_line)) g.DrawRectangle(pen, box.Left, box.Top, BOX - 1, BOX - 1);
+        }
+        var tr = new Rectangle(BOX + GAP, 0, Width - BOX - GAP, Height);
+        TextRenderer.DrawText(g, Text, Font, tr, fore,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+    }
+    protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); Invalidate(); }
+    protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); Invalidate(); }
+    protected override void OnCheckedChanged(EventArgs e) { base.OnCheckedChanged(e); Invalidate(); }
+    protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Invalidate(); }
 }

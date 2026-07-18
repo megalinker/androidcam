@@ -35,6 +35,7 @@ if (Test-Path $vswhere) {
 if (-not $csc) { throw 'Roslyn csc.exe not found (need Visual Studio 2019/2022 Build Tools) — cannot build PhoneCam.exe.' }
 $guiSrc = @(Join-Path $PSScriptRoot 'files\PhoneCam-GUI.cs') + @((Get-ChildItem (Join-Path $PSScriptRoot 'files\qrcoder\*.cs')).FullName)
 & $csc /nologo /target:winexe "/out:$(Join-Path $OutDir 'PhoneCam.exe')" `
+    "/win32icon:$(Join-Path $PSScriptRoot 'files\phonecam.ico')" `
     /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
     /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll `
     $guiSrc
