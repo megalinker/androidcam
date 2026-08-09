@@ -1,5 +1,9 @@
 # PhoneCam — How to measure (with just your phone)
 
+> **Phone-side battery/thermal/CPU measurement lives in [`docs/diagnostics.md`](../diagnostics.md)**
+> (opt-in session telemetry, `tools/battery-session.ps1`, `tools/battery-compare.ps1`,
+> `tools/power-trace.ps1`). This page covers the **receiver-side** latency/queue instrumentation.
+
 The receiver now has flag-gated, single-clock instrumentation. It's **off** unless `PHONECAM_STATS`
 is set, and it never logs per-frame (aggregates p50/p95/max/mean to stderr ~once a second). All
 numbers are **PC-internal deltas** (steady_clock/QPC) — no phone↔PC clock calibration needed. For the
@@ -74,14 +78,17 @@ speakers, volume up, quiet room:
 ## 4. CPU / GPU / memory / battery
 - **PC CPU/GPU/mem:** Task Manager while streaming; for a rigorous trace use WPR/WPA (ETW). Compare
   preview-visible vs minimized vs no softcam consumer to isolate preview cost (F-22/F-25).
-- **Phone (Wi-Fi path only):** charge to full, unplug, then:
+- **Phone (Wi-Fi path only):** use the scripted flow — it does the reset/stream/collect/summarise
+  cycle and refuses to present a charging run as a drain measurement:
+  ```powershell
+  .\tools\battery-session.ps1 -Transport wifi -Minutes 15 -Scenario static
+  .\tools\battery-compare.ps1
   ```
-  adb shell dumpsys batterystats --reset      # before
-  # stream N minutes
-  adb shell dumpsys batterystats > after.txt  # or use Battery Historian
-  adb shell dumpsys thermalservice            # thermal state
+  For a platform-level view (battery counters, CPU frequency, and power rails on Pixel 6+):
+  ```powershell
+  .\tools\power-trace.ps1 -Seconds 120     # open the result at https://ui.perfetto.dev
   ```
-  Read battery % delta over a fixed duration; keep screen state/brightness/ambient constant between runs.
+  Full guide: [`docs/diagnostics.md`](../diagnostics.md).
 
 ## 5. Rules
 One variable per run; ≥5 repetitions; report p50/p95 (not just mean); same scene/thermal state for

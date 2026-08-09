@@ -28,6 +28,14 @@ Mic    ─ org.webrtc Opus  ─┴─ Wi-Fi: DTLS-SRTP / UDP ──→│ libdat
 
 The **phone's mode** (Cam+Mic / Camera / Mic) decides which tracks it sends; the receiver feeds whichever sink applies. The desktop app (`PhoneCam.exe`) is the launcher: it detects the phone, picks the transport, drives `adb`, shows the pairing QR when needed, and hosts a live preview.
 
+### Phone battery on the PC
+
+The desktop app's Status panel shows the phone's remaining battery and whether it is charging. It
+rides the control channel each transport already has — the PCAM3 signaling socket over Wi-Fi, the
+media socket's frame format over USB — so there is no extra connection and no polling: one ~90-byte
+message a minute, plus an immediate update when the charger is plugged or unplugged. Older phone or
+PC builds simply never negotiate it and keep working.
+
 ### Manual image controls (never automatic)
 
 Mirror (L/R), flip (U/D), rotate (0/90/180/270), and front/back camera switch are all **user-driven buttons** in the desktop app, applied **live** while streaming (the app streams commands to `receiver.exe` over its stdin; the camera flip goes to the phone over `adb`). Nothing rotates or mirrors on its own — the raw sensor image is shown as-is until you change it.
@@ -57,7 +65,8 @@ Windows has **no user-mode way** to add a microphone — the audio engine only e
 phonecam/
 ├── android/     # the phone app — build on Linux/Mac/Windows with Android Studio / Gradle
 ├── windows/     # the C++ receiver, the C# desktop app, packaging, and the optional audio driver
-└── docs/        # architecture + build/run
+├── tools/       # battery/power measurement scripts (adb + Perfetto, no root)
+└── docs/        # architecture + build/run + diagnostics
 ```
 
 ## Prior art we lean on
@@ -69,3 +78,7 @@ phonecam/
 - [`darusc/VCamdroid`](https://github.com/darusc/VCamdroid) (MIT) — early end-to-end reference: Android → Windows softcam.
 
 See **[docs/architecture.md](docs/architecture.md)** for the design and the reasoning, and **[docs/build-and-run.md](docs/build-and-run.md)** for building and running each side.
+
+Measuring battery, thermals and stream health — and capturing evidence when the video glitches — is
+covered in **[docs/diagnostics.md](docs/diagnostics.md)** (opt-in; off by default, because recording
+costs battery too). The scripts live in [`tools/`](tools).

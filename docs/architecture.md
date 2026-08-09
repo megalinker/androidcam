@@ -31,6 +31,23 @@ Turn an Android phone into a **webcam and/or microphone** for a **Windows 10/11*
 - **LAN-direct, pinned identity.** **Host ICE candidates only** — no STUN, no TURN, no cloud. The `pairSecret` gates the signaling channel; the DTLS fingerprints in the SDP are the pinned identity.
 - **A/V sync for free.** Opus and H.264 are separate SRTP tracks sharing the WebRTC clock + RTCP sender reports, so lip-sync is handled by the stack.
 - **Codecs stay on FFmpeg.** libdatachannel delivers decrypted RTP; the receiver decodes with `avcodec_send_packet`/`avcodec_receive_frame`, `sws_scale` → BGR for softcam, `swresample` → PCM for the audio endpoint. No `avformat`.
+- **The signaling socket doubles as the control channel.** It is open for the whole session anyway (the phone blocks on it to notice the PC pressing Stop), so small status/control messages ride it rather than justifying a second connection. After the answer the PC sends `V` (hello, advertising what it understands); the phone then pushes `B` (device status: battery %, charging, temperature) about once a minute, and the PC may send `M` (the operator pressed "Mark video problem"). Unknown types are skipped by length in both directions, so either side can add messages — and an older peer, which never sends or reads them, keeps working unchanged.
+
+## Packet loss and the visible consequence
+
+libdatachannel's `H264RtpDepacketizer` emits a frame built from whatever packets arrived, **without
+signalling that any were missing**, and its `RtcpReceivingSession` never generates NACKs even though
+the offer advertises them. A lost packet therefore reaches the decoder as a silently-truncated frame;
+the concealed macroblocks then persist through subsequent P-frames until something moves through that
+region or a keyframe arrives.
+
+The receiver closes that gap where it is cheapest: `RtpLossMonitor` (`rtp_seq.h`/`rtp_loss.h`) sits at
+the head of the incoming media chain and watches raw RTP sequence numbers — a subtract, a compare and
+one relaxed atomic store per packet. If packets went missing since the previous frame, or FFmpeg flags
+the decoded frame as damaged/concealed, the receiver requests one keyframe, rate-limited to 1 s. In a
+clean session it never fires. Reordering and duplicates are distinguished from loss so ordinary jitter
+costs nothing. No NACK, no FEC, no shortened GOP — recovery stays event-driven rather than becoming a
+standing bitrate and battery tax. See `docs/perf-audit/battery-investigation.md`.
 
 ## Transport 2 — USB: a scrcpy-style pipe over adb
 
@@ -39,7 +56,7 @@ The cable is the steadiest link (no Wi-Fi jitter, congestion, or AP-isolation), 
 > **WebRTC media is UDP; `adb forward` is TCP-only; and libdatachannel's ICE (libjuice) is UDP-only.** So the Wi-Fi WebRTC media simply can't ride an adb tunnel. Modeled on **[scrcpy](https://github.com/Genymobile/scrcpy)**, the USB path is therefore its own thing: MediaCodec-encoded media over a raw framed TCP socket.
 
 - **Phone side** (`UsbStreamer.kt`): Camera2 feeds a **MediaCodec H.264** encoder through its input Surface (GPU path, `KEY_LOW_LATENCY`, no B-frames, 1 s GOP); the mic is captured as **raw PCM** (S16LE 48 kHz — USB has bandwidth to spare, so no audio codec/latency). The phone binds a TCP `ServerSocket` on `127.0.0.1:27183` and the PC connects through the forward. The MediaCodec callback runs on a **background thread** (writing to a socket on the main thread throws `NetworkOnMainThreadException`).
-- **Frame protocol:** `[1 byte type][8-byte ptsUs big-endian][4-byte length big-endian][payload]`. `H` = one JSON header (geometry, audio rate/channels), `V` = H.264 Annex-B (the codec-config SPS/PPS is the first `V`), `A` = interleaved PCM.
+- **Frame protocol:** `[1 byte type][8-byte ptsUs big-endian][4-byte length big-endian][payload]`. `H` = one JSON header (geometry, audio rate/channels), `V` = H.264 Annex-B (the codec-config SPS/PPS is the first `V`), `A` = interleaved PCM, `S` = device status (battery). The reverse direction — previously read only to detect EOF — carries `[1 byte type][4-byte length][payload]` control frames: `K` = emit a keyframe now (sent when the receiver's video queue overflows, which is the only way the cable path can corrupt itself), `M` = the operator marked a video problem. Unknown types are skipped by length, so old and new builds interoperate in both directions.
 - **PC side** (`usb_receiver.cpp`, `receiver --usb --usb-port <n>`): connects to the adb-forwarded port; a receive thread does I/O only and dispatches `V` to a **decode thread** and `A` to an **audio thread**, so neither can starve the socket reads. Same FFmpeg → softcam / WASAPI sinks as WebRTC.
 - **Orchestration** (desktop app): on Start it detects an authorized adb device, runs `adb forward tcp:27183 tcp:27183`, `pm grant`s camera/mic, `am start`s the app with `ACTION_USB`, and launches `receiver --usb`. **No QR, no tethering** — plug in and press Start.
 
