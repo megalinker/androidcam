@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
@@ -46,6 +47,14 @@ class StreamService : Service() {
         // it has nothing to echo-cancel, and raw sounds fuller). Default true = raw; the desktop app's
         // "Phone-call noise filter" checkbox turns the processing back on for noisy rooms. (F-12)
         const val EXTRA_RAW_MIC = "rawMic"
+        // Diagnostics: OFF unless the user turns it on in the phone app, or a caller passes these.
+        // `diag` enables the 30 s session sampler; `deepDiag` additionally drops to a 5 s cadence.
+        // Battery reporting to the PC is a separate, always-on production feature and is NOT gated
+        // by these — it is a single sticky-intent read per minute.
+        const val EXTRA_DIAG = "diag"
+        const val EXTRA_DEEP_DIAG = "deepDiag"
+        /** SharedPreferences key backing the in-app "Record diagnostics" switch. */
+        const val PREF_DIAG = "diagEnabled"
         // Transport: "webrtc" (default, Wi-Fi) or "usb" (scrcpy-style H.264/PCM over an adb-forwarded socket).
         const val EXTRA_TRANSPORT = "transport"
         // WebRTC signaling target (from the PC's PCAM3 QR).
@@ -64,6 +73,11 @@ class StreamService : Service() {
         // PC is reconnecting (it retries within seconds) or the session is over.
         private const val IDLE_AFTER_DISCONNECT_MS = 2 * 60 * 1000L
         private const val IDLE_CHECK_MS = 30 * 1000L
+        // How often the phone tells the PC its battery level. Battery % moves at most ~1 point every
+        // few minutes under this workload, so a minute is already far finer than the data; charger
+        // plug/unplug is delivered as an event, not waited for. One ~90-byte write on a socket that
+        // is open anyway.
+        private const val STATUS_PUSH_MS = 60 * 1000L
 
         val DEFAULT_QUALITY = Quality.FHD_1080P30
 
@@ -102,10 +116,90 @@ class StreamService : Service() {
             val timeout = if (everConnected) IDLE_AFTER_DISCONNECT_MS else IDLE_TIMEOUT_MS
             if (!clientConnected && SystemClock.elapsedRealtime() - lastClientMs > timeout) {
                 Log.i(TAG, "no PC for ${timeout / 60000} min — auto-stopping to save battery")
+                Diag.event("idle_autostop", "timeoutMs=$timeout")
                 stopStreaming()
                 return
             }
             idleHandler.postDelayed(this, IDLE_CHECK_MS)
+        }
+    }
+
+    // --- device status (battery) -> PC, over whichever control channel the transport already has ---
+    //
+    // Runs on its own background thread, NOT the main looper: pushing a status writes to a TCP socket,
+    // and Android forbids network I/O on the main thread (NetworkOnMainThreadException). The thread is
+    // asleep between the once-a-minute ticks.
+    private var statusThread: HandlerThread? = null
+    @Volatile private var statusHandler: Handler? = null
+    private val statusTick = object : Runnable {
+        override fun run() {
+            if (!isRunning) return
+            pushStatus()
+            statusHandler?.postDelayed(this, STATUS_PUSH_MS)
+        }
+    }
+    /** Charger plug/unplug is a system broadcast — an event, so nothing has to poll for it. */
+    private val powerReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(ctx: android.content.Context?, i: Intent?) {
+            val connected = i?.action == Intent.ACTION_POWER_CONNECTED
+            Diag.onPowerConnectionChanged(connected)
+            postStatus()          // onReceive is on the main thread — hop off it before writing
+        }
+    }
+    private var powerReceiverRegistered = false
+
+    /** Request a status push from any thread; it runs on the status thread. */
+    fun postStatus() { statusHandler?.post { pushStatus() } }
+
+    /** Read the battery (one sticky-intent lookup) and hand it to the active transport. */
+    private fun pushStatus() {
+        val json = runCatching {
+            PhoneStatus.encode(Diag.readBattery(applicationContext), Diag.sessionId, System.currentTimeMillis())
+        }.getOrNull() ?: return
+        webrtcSender?.sendStatus(json)
+        usbStreamer?.sendStatus(json)
+    }
+
+    private fun startStatusReporting() {
+        if (statusThread == null) {
+            val t = HandlerThread("phonecam-status", android.os.Process.THREAD_PRIORITY_BACKGROUND)
+            t.start()
+            statusThread = t
+            statusHandler = Handler(t.looper)
+        }
+        if (!powerReceiverRegistered) {
+            val f = android.content.IntentFilter().apply {
+                addAction(Intent.ACTION_POWER_CONNECTED)
+                addAction(Intent.ACTION_POWER_DISCONNECTED)
+            }
+            androidx.core.content.ContextCompat.registerReceiver(
+                this, powerReceiver, f, androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
+            powerReceiverRegistered = true
+        }
+        statusHandler?.removeCallbacks(statusTick)
+        statusHandler?.postDelayed(statusTick, STATUS_PUSH_MS)
+    }
+
+    private fun stopStatusReporting() {
+        statusHandler?.removeCallbacks(statusTick)
+        statusHandler = null
+        statusThread?.quitSafely()
+        statusThread = null
+        if (powerReceiverRegistered) {
+            runCatching { unregisterReceiver(powerReceiver) }
+            powerReceiverRegistered = false
+        }
+    }
+
+    /** OFF unless the user enabled it in the app or the caller (desktop app / test script) asked. */
+    private fun diagLevelFor(intent: Intent?): Diag.Level {
+        val prefOn = getSharedPreferences("phonecam", MODE_PRIVATE).getBoolean(PREF_DIAG, false)
+        val deep = intent?.getBooleanExtra(EXTRA_DEEP_DIAG, false) ?: false
+        val on = deep || (intent?.getBooleanExtra(EXTRA_DIAG, prefOn) ?: prefOn)
+        return when {
+            deep -> Diag.Level.DEEP
+            on -> Diag.Level.BASIC
+            else -> Diag.Level.OFF
         }
     }
 
@@ -125,6 +219,10 @@ class StreamService : Service() {
         val rawMic = intent?.getBooleanExtra(EXTRA_RAW_MIC, true) ?: true   // default = raw/fuller mic (better sounding)
 
         startForegroundForMode(mode)
+        if (!isRunning) {
+            Diag.start(applicationContext, diagLevelFor(intent),
+                "mode=$mode quality=${quality.name} transport=$transport rawMic=$rawMic")
+        }
         if (transport == "usb") {
             val usbPort = intent?.getIntExtra(EXTRA_USB_PORT, DEFAULT_USB_PORT) ?: DEFAULT_USB_PORT
             startUsbStreaming(mode, quality, usbPort, rawMic)
@@ -151,6 +249,8 @@ class StreamService : Service() {
                 clientConnected = connected
                 if (connected) everConnected = true
                 lastClientMs = SystemClock.elapsedRealtime()
+                Diag.event(if (connected) "pc_connected" else "pc_disconnected", "transport=usb")
+                if (connected) postStatus()   // first reading right away
             }
             usbStreamer = streamer
             streamer.start()
@@ -159,10 +259,14 @@ class StreamService : Service() {
             acquireWakeLock()
             lastClientMs = SystemClock.elapsedRealtime()
             idleHandler.postDelayed(idleCheck, IDLE_CHECK_MS)
+            startStatusReporting()
             Log.i(TAG, "usb streamer up ($mode, ${quality.label}) on 127.0.0.1:$port")
             updateNotification()
         } catch (e: Exception) {
             Log.e(TAG, "startUsbStreaming failed", e)
+            Diag.event("start_failed", "transport=usb", "err=${e.javaClass.simpleName}")
+            Diag.stop("start_failed")
+            stopStatusReporting()
             releaseWakeLock()
             runCatching { usbStreamer?.stop() }
             usbStreamer = null
@@ -193,15 +297,20 @@ class StreamService : Service() {
                         clientConnected = true; everConnected = true
                         lastClientMs = SystemClock.elapsedRealtime()
                         Log.i(TAG, "webrtc: connected to PC")
+                        Diag.event("pc_connected", "transport=webrtc")
                     }
                     WebRtcSender.State.CONNECTING -> Log.i(TAG, "webrtc: connecting…")
                     WebRtcSender.State.DISCONNECTED, WebRtcSender.State.FAILED -> {
                         clientConnected = false
                         Log.i(TAG, "webrtc: $state — stopping")
+                        Diag.event("pc_disconnected", "transport=webrtc", "state=$state")
                         idleHandler.post { stopStreaming() }
                     }
                 }
             }
+            // The PC announces device-status support on the signaling socket; send the first reading
+            // the moment it does, so the desktop shows a battery level without waiting a minute.
+            sender.onStatusChannelReady = { postStatus() }
             webrtcSender = sender
             sender.start()
             streamUrl = sigHost
@@ -209,11 +318,15 @@ class StreamService : Service() {
             acquireWakeLock()   // keep the CPU/stream alive with the screen off (less heat than forcing it on)
             lastClientMs = SystemClock.elapsedRealtime()
             idleHandler.postDelayed(idleCheck, IDLE_CHECK_MS)   // auto-stop if no PC ever connects
+            startStatusReporting()
             Log.i(TAG, "webrtc push up ($mode, ${quality.label}) to $sigHost:$sigPort")
             updateNotification()
         } catch (e: Exception) {
             // Never crash-loop the service (it is START_STICKY): stop cleanly on any start failure.
             Log.e(TAG, "startStreaming failed", e)
+            Diag.event("start_failed", "transport=webrtc", "err=${e.javaClass.simpleName}")
+            Diag.stop("start_failed")
+            stopStatusReporting()
             releaseWakeLock()   // don't leak the CPU lock if we bail after acquiring it
             runCatching { webrtcSender?.stop() }
             webrtcSender = null
@@ -237,18 +350,26 @@ class StreamService : Service() {
             setReferenceCounted(false)
             acquire(4 * 60 * 60 * 1000L)   // 4h safety cap; released explicitly on stop
         }
+        Diag.event("wakelock_acquired", "type=PARTIAL", "timeoutMs=${4 * 60 * 60 * 1000L}")
     }
 
     private fun releaseWakeLock() {
+        val held = wakeLock?.isHeld == true
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
+        if (held) Diag.event("wakelock_released")
     }
 
     private fun stopStreaming() {
+        val wasRunning = isRunning
         idleHandler.removeCallbacks(idleCheck)
+        stopStatusReporting()
         releaseWakeLock()
         runCatching { webrtcSender?.stop() }
         runCatching { usbStreamer?.stop() }
+        // Closed last, so the teardown events above (wakelock release, transport stop) are still
+        // recorded and the summary is genuinely the final line of the session.
+        if (wasRunning) Diag.stop("stream_stopped")
         webrtcSender = null
         usbStreamer = null
         isRunning = false

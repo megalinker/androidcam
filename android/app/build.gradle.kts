@@ -13,8 +13,8 @@ android {
         applicationId = "com.phonecam"
         minSdk = 21
         targetSdk = 34
-        versionCode = 38
-        versionName = "0.6.0"
+        versionCode = 39
+        versionName = "0.6.1"
 
         ndk {
             // Ship only ARM ABIs: the org.webrtc native lib is large and x86/x86_64 are emulator-only
@@ -59,6 +59,15 @@ android {
     buildFeatures {
         buildConfig = true   // expose BuildConfig.VERSION_NAME to show the version in-app
     }
+
+    testOptions {
+        unitTests {
+            // The diagnostics ring and the status wire format are plain JVM logic, but they brush
+            // against android.util.Log / SystemClock. Returning defaults instead of throwing lets them
+            // be tested on the JVM (fast, no device) without introducing a mocking framework.
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 kotlin {
@@ -76,4 +85,6 @@ dependencies {
     // WebRTC media stack (org.webrtc.*) — the phone's only transport. Pre-built and maintained;
     // handles Oboe/AAudio low-latency capture, Opus + H.264 (via MediaCodec), and DTLS-SRTP.
     implementation("io.getstream:stream-webrtc-android:1.3.10")
+
+    testImplementation("junit:junit:4.13.2")
 }

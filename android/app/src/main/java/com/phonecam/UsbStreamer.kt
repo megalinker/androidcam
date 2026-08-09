@@ -62,6 +62,11 @@ class UsbStreamer(
 
     private var acceptThread: Thread? = null
 
+    // Resolution actually negotiated with the camera (may differ from the requested preset — see
+    // pickCaptureSize). This is what the encoder is configured with and what the PC is told.
+    private var capW = videoW
+    private var capH = videoH
+
     // video
     private var encoder: MediaCodec? = null
     private var encThread: HandlerThread? = null   // owns the encoder callback (must NOT be the main thread — it does socket writes)
@@ -102,30 +107,34 @@ class UsbStreamer(
             Log.i(TAG, "usb: PC connected")
             onClient(true)
 
+            if (withVideo) pickCaptureSize()
+
             // Header first, so the PC can configure its decoders/sinks before any media.
             val meta = JSONObject()
                 .put("v", 1)
                 .put("vcodec", if (withVideo) "h264" else "none")
-                .put("w", videoW).put("h", videoH).put("fps", videoFps)
+                .put("w", capW).put("h", capH).put("fps", videoFps)
                 .put("arate", AUDIO_RATE).put("achannels", 1)
                 .put("audio", if (withAudio) "pcm_s16le" else "none")
                 .toString()
             writeFrame('H', 0, meta.toByteArray(Charsets.UTF_8))
+            Diag.event("transport_connected", "transport=usb", "port=$port")
 
             if (withVideo) startVideo()
             if (withAudio) startAudio()
 
-            // Block until the PC drops the socket (read returns EOF) or we're stopped.
-            val inp = s.getInputStream()
-            while (!closed.get()) { if (inp.read() < 0) break }
+            // Read the PC's control stream until EOF. Older receivers send nothing at all here, so
+            // this doubles as the "PC went away" detector it has always been.
+            readControl(s.getInputStream())
         } catch (e: Exception) {
             if (!closed.get()) Log.w(TAG, "usb: client ended", e)
         } finally {
             stopVideo()
+            socket = null          // the capture loop's exit condition — clear it BEFORE joining below
             stopAudio()
             runCatching { out?.flush() }
             runCatching { s.close() }
-            socket = null; out = null
+            out = null
             Log.i(TAG, "usb: PC disconnected")
         }
     }
@@ -144,6 +153,118 @@ class UsbStreamer(
             o.write(payload, offset, len)
             o.flush()   // flush per frame: this is a latency path, not a throughput one
         }
+        if (Diag.on) Diag.c.socketWrites.incrementAndGet()
+    }
+
+    /**
+     * Push one device-status frame ('S'). Receivers that predate the feature dispatch only H/V/A and
+     * silently drop it, so this is safe to send unconditionally. ~90 bytes/minute.
+     */
+    fun sendStatus(json: String): Boolean {
+        if (closed.get() || out == null) return false
+        return runCatching {
+            writeFrame(PhoneStatus.USB_STATUS, 0, json.toByteArray(Charsets.UTF_8))
+            if (Diag.on) Diag.c.statusPushes.incrementAndGet()
+            true
+        }.getOrElse {
+            if (Diag.on) Diag.c.socketWriteErrors.incrementAndGet()
+            false
+        }
+    }
+
+    /**
+     * PC → phone control channel, framed as `[1B type][4B BE len][payload]`.
+     *  'K' — the receiver detected corruption/loss; emit a keyframe now instead of waiting out the GOP.
+     *  'M' — the user pressed "Mark video problem" on the PC; drop a correlated marker in our log.
+     * Unknown types are skipped by length. Returns when the socket reaches EOF (the PC went away),
+     * which is exactly the old behaviour.
+     */
+    private fun readControl(inp: java.io.InputStream) {
+        val head = ByteArray(5)
+        while (!closed.get()) {
+            var got = 0
+            while (got < 5) {
+                val n = inp.read(head, got, 5 - got)
+                if (n < 0) return          // EOF — PC closed the socket
+                got += n
+            }
+            val type = head[0].toInt().toChar()
+            val len = ((head[1].toInt() and 0xff) shl 24) or ((head[2].toInt() and 0xff) shl 16) or
+                      ((head[3].toInt() and 0xff) shl 8) or (head[4].toInt() and 0xff)
+            if (len < 0 || len > 64 * 1024) return   // desync — treat like a dropped peer
+            val body = ByteArray(len)
+            var read = 0
+            while (read < len) {
+                val n = inp.read(body, read, len - read)
+                if (n < 0) return
+                read += n
+            }
+            when (type) {
+                PhoneStatus.MSG_KEYFRAME -> requestSyncFrame("pc")
+                PhoneStatus.MSG_MARK -> {
+                    if (Diag.on) {
+                        Diag.c.problemMarks.incrementAndGet()
+                        Diag.event("problem_mark", "source=pc",
+                            "note=" + String(body, Charsets.UTF_8).take(64))
+                    }
+                }
+                else -> Diag.deep("control_unknown", "type=$type", "len=$len")
+            }
+        }
+    }
+
+    /**
+     * Ask the encoder for an IDR on the next frame. Used on a lens switch and when the PC reports
+     * corruption. Cost: one larger frame — event-driven, so it never becomes a standing bitrate tax.
+     */
+    fun requestSyncFrame(why: String) {
+        val enc = encoder ?: return
+        runCatching {
+            enc.setParameters(android.os.Bundle().apply {
+                putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+            })
+            if (Diag.on) {
+                Diag.c.keyframeRequests.incrementAndGet()
+                Diag.event("keyframe_requested", "source=$why")
+            }
+        }
+    }
+
+    /**
+     * Snap the requested preset to a size the camera actually supports for a MediaCodec surface.
+     *
+     * Camera2 does not scale arbitrarily: an unsupported output size either fails session
+     * configuration outright or makes the HAL pick something else and letterbox/scale it — wasted ISP
+     * work, and a stream whose real geometry no longer matches what we told the PC. Picking the exact
+     * supported size closest to (but not larger than) the request keeps the sensor from producing
+     * pixels we would only throw away, and the header now reports what we truly capture.
+     */
+    private fun pickCaptureSize() {
+        capW = videoW; capH = videoH
+        runCatching {
+            val mgr = appCtx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val id = pickCamera(mgr, useBackCamera) ?: return
+            val map = mgr.getCameraCharacteristics(id)
+                .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return
+            val sizes = map.getOutputSizes(MediaCodec::class.java) ?: return
+            if (sizes.any { it.width == videoW && it.height == videoH }) {
+                Diag.event("camera_size", "requested=${videoW}x$videoH", "actual=${capW}x$capH", "exact=1")
+                return
+            }
+            val wantArea = videoW.toLong() * videoH
+            val wantAspect = videoW.toDouble() / videoH
+            // Prefer same-aspect, no larger than requested (never capture more pixels than asked for);
+            // fall back to the closest by area if nothing fits.
+            val best = sizes.filter { it.width <= videoW && it.height <= videoH }
+                .minByOrNull {
+                    val aspectPenalty = Math.abs(it.width.toDouble() / it.height - wantAspect) * 4
+                    Math.abs(it.width.toLong() * it.height - wantArea) / wantArea.toDouble() + aspectPenalty
+                }
+                ?: sizes.minByOrNull { Math.abs(it.width.toLong() * it.height - wantArea) }
+            if (best != null) { capW = best.width; capH = best.height }
+            Log.i(TAG, "usb: capture size ${videoW}x$videoH not supported — using ${capW}x$capH")
+            Diag.event("camera_size", "requested=${videoW}x$videoH", "actual=${capW}x$capH", "exact=0")
+        }
     }
 
     // --- video: Camera2 -> encoder input Surface -> H.264 Annex-B frames ---
@@ -153,9 +274,9 @@ class UsbStreamer(
             != PackageManager.PERMISSION_GRANTED) {
             Log.e(TAG, "usb: no camera permission"); return
         }
-        val fmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, videoW, videoH).apply {
+        val fmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, capW, capH).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, bitrateFor(videoW, videoH, videoFps))
+            setInteger(MediaFormat.KEY_BIT_RATE, bitrateFor(capW, capH, videoFps))
             setInteger(MediaFormat.KEY_FRAME_RATE, videoFps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)   // 1s GOP: fast first frame + quick recovery
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
@@ -179,9 +300,22 @@ class UsbStreamer(
                     val buf: ByteBuffer? = codec.getOutputBuffer(index)
                     if (buf != null && info.size > 0) {
                         buf.position(info.offset); buf.limit(info.offset + info.size)
-                        val bytes = ByteArray(info.size)
-                        buf.get(bytes)
-                        writeFrame('V', info.presentationTimeUs, bytes)   // Annex-B (incl. the CODEC_CONFIG buffer)
+                        // Reuse one growable staging buffer instead of allocating per frame. The
+                        // callback is single-threaded (the usb-enc HandlerThread) and writeFrame
+                        // copies to the socket before returning, so reuse is safe — and it removes a
+                        // 30–60/s heap allocation of tens to hundreds of KB (pure GC pressure).
+                        if (outBuf.size < info.size) outBuf = ByteArray(info.size + (info.size shr 2))
+                        buf.get(outBuf, 0, info.size)
+                        writeFrame('V', info.presentationTimeUs, outBuf, 0, info.size)   // Annex-B (incl. CODEC_CONFIG)
+                        if (Diag.on) {
+                            Diag.c.encodedBytes.addAndGet(info.size.toLong())
+                            if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+                                Diag.c.framesEncoded.incrementAndGet()
+                                Diag.c.cameraFrames.incrementAndGet()   // surface path: 1 capture == 1 encode
+                                if ((info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0)
+                                    Diag.c.keyFrames.incrementAndGet()
+                            }
+                        }
                     }
                 } catch (e: Exception) {
                     if (!closed.get()) Log.w(TAG, "usb: encoder output failed", e)
@@ -191,14 +325,45 @@ class UsbStreamer(
             }
             override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
                 Log.e(TAG, "usb: encoder error", e)
+                if (Diag.on) Diag.c.encoderErrors.incrementAndGet()
+                // getErrorCode is API 23+; the vendor code is the useful part when it's available.
+                val code = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M)
+                    runCatching { e.errorCode }.getOrDefault(-1) else -1
+                Diag.event("encoder_error", "recoverable=${e.isRecoverable}",
+                    "transient=${e.isTransient}", "code=$code")
             }
-            override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {}
+            override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
+                Diag.event("encoder_format", "fmt=" + format.toString().take(180))
+            }
         }, Handler(et.looper))
         enc.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         inputSurface = enc.createInputSurface()
         enc.start()
         encoder = enc
+        logEncoderIdentity(enc, fmt)
         openCamera()
+    }
+
+    /** Staging buffer for encoder output — grown on demand, never reallocated per frame. */
+    private var outBuf = ByteArray(64 * 1024)
+
+    /**
+     * Record which encoder the platform actually gave us. `isHardwareAccelerated`/`isSoftwareOnly`
+     * (API 29+) is the authoritative answer to "are we burning CPU on software H.264?" — guessing from
+     * the codec name ("OMX.google.*" = software) is only a fallback for older devices.
+     */
+    private fun logEncoderIdentity(enc: MediaCodec, fmt: MediaFormat) {
+        if (!Diag.on) return
+        runCatching {
+            val info = enc.codecInfo
+            val hw = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q)
+                (if (info.isHardwareAccelerated) "1" else "0")
+            else (if (info.name.startsWith("OMX.google.") || info.name.startsWith("c2.android.")) "0" else "unknown")
+            Diag.event("encoder_started", "transport=usb", "codec=h264", "name=${info.name}",
+                "hardware=$hw", "w=$capW", "h=$capH", "fps=$videoFps",
+                "bitrate=${fmt.getInteger(MediaFormat.KEY_BIT_RATE)}",
+                "gopS=${fmt.getInteger(MediaFormat.KEY_I_FRAME_INTERVAL)}")
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -219,11 +384,15 @@ class UsbStreamer(
                     override fun onConfigured(session: CameraCaptureSession) {
                         if (closed.get()) return
                         captureSession = session
-                        // Try a fixed-fps request; if the device rejects that AE range, retry without it
-                        // (a rejected request = a repeating capture that never starts = zero frames).
+                        // Pick an AE target-fps range the device actually advertises. Asking blindly for
+                        // [fps,fps] and falling back to "no range" on rejection is a battery trap: with
+                        // no range set, AE is free to run the sensor at its maximum (often 60) even
+                        // though we only encode/transmit `videoFps` — double the ISP + encoder work for
+                        // frames nobody sees.
+                        val range = pickFpsRange(mgr, camId, videoFps)
                         val req = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                             addTarget(surface)
-                            set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, android.util.Range(videoFps, videoFps))
+                            if (range != null) set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
                             // Turn off electronic image stabilization: it buffers/warps frames and adds
                             // latency, at odds with the low-latency USB path (F-17). Best-effort.
                             runCatching { set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF) }
@@ -240,8 +409,11 @@ class UsbStreamer(
                         // Force the next encoded frame to be an IDR so a lens switch starts clean rather
                         // than coding the very different new image against stale references (~1s of
                         // artifacts otherwise). Harmless on the initial open (its first frame is an IDR). (F-10)
-                        runCatching { encoder?.setParameters(android.os.Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) }) }
-                        Log.i(TAG, "usb: camera streaming ${videoW}x${videoH}@${videoFps}")
+                        requestSyncFrame("camera-open")
+                        Log.i(TAG, "usb: camera streaming ${capW}x${capH}@${videoFps}")
+                        Diag.event("camera_started", "transport=usb", "camId=$camId",
+                            "w=$capW", "h=$capH", "reqFps=$videoFps",
+                            "aeRange=${range ?: "device-default"}", "fixedFpsAccepted=${if (ok) 1 else 0}")
                     }
                     override fun onConfigureFailed(session: CameraCaptureSession) {
                         Log.e(TAG, "usb: capture session config failed")
@@ -265,8 +437,24 @@ class UsbStreamer(
             runCatching { camera?.close() }; camera = null
             openCamera()   // reopens on the other lens, same encoder input surface
             Log.i(TAG, "usb: switched to ${if (useBackCamera) "back" else "front"} camera")
+            Diag.event("camera_switched", "back=${if (useBackCamera) 1 else 0}")
         }
     }
+
+    /**
+     * The advertised AE target-fps range that best pins capture to [fps]. Prefers an exact
+     * `[fps, fps]` (fixed-rate, minimum sensor work); otherwise the narrowest advertised range whose
+     * upper bound is [fps] — never one that lets AE run faster than we encode. Null if the device
+     * advertises nothing usable, in which case we leave AE alone rather than force a rejected request.
+     */
+    private fun pickFpsRange(mgr: CameraManager, camId: String, fps: Int): android.util.Range<Int>? =
+        runCatching {
+            val ranges = mgr.getCameraCharacteristics(camId)
+                .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return null
+            ranges.firstOrNull { it.lower == fps && it.upper == fps }
+                ?: ranges.filter { it.upper == fps }.minByOrNull { it.upper - it.lower }
+                ?: ranges.filter { it.upper <= fps }.maxByOrNull { it.upper }
+        }.getOrNull()
 
     private fun pickCamera(mgr: CameraManager, back: Boolean): String? {
         return try {
@@ -309,6 +497,8 @@ class UsbStreamer(
                     AUDIO_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize)
                 if (rec.state != AudioRecord.STATE_INITIALIZED) { Log.e(TAG, "usb: AudioRecord init failed"); return@Thread }
                 rec.startRecording()
+                Diag.event("audio_started", "transport=usb", "rate=$AUDIO_RATE",
+                    "source=${if (rawMic) "MIC" else "VOICE_COMMUNICATION"}", "bufBytes=$bufSize")
                 val chunk = ByteArray(AUDIO_RATE / 50 * 2)   // ~20ms chunks
                 var samples = 0L
                 while (!closed.get() && socket != null) {
@@ -317,6 +507,10 @@ class UsbStreamer(
                     val ptsUs = samples * 1_000_000L / AUDIO_RATE
                     writeFrame('A', ptsUs, chunk, 0, n)
                     samples += n / 2
+                    if (Diag.on) {
+                        Diag.c.audioChunks.incrementAndGet()
+                        Diag.c.audioBytes.addAndGet(n.toLong())
+                    }
                 }
             } catch (e: Exception) {
                 if (!closed.get()) Log.w(TAG, "usb: audio failed", e)
@@ -328,7 +522,14 @@ class UsbStreamer(
     }
 
     private fun stopAudio() {
-        audioThread?.interrupt(); audioThread = null
+        val t = audioThread ?: return
+        audioThread = null
+        // AudioRecord.read() is a blocking native call that ignores interrupt(), so the capture thread
+        // only notices the shutdown when its current ~20 ms read returns. Wait for it: without the join
+        // a fast reconnect could start a second AudioRecord while the first was still capturing —
+        // two live mic streams for a moment, which is exactly the kind of duplicate work we are hunting.
+        t.interrupt()
+        runCatching { t.join(500) }
     }
 
     fun stop() {

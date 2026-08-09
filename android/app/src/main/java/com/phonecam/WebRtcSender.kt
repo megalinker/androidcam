@@ -75,6 +75,18 @@ class WebRtcSender(
     private val closed = AtomicBoolean(false)
     private val gatheringComplete = CountDownLatch(1)
 
+    // --- device-status side channel on the signaling socket (see PhoneStatus.kt) ---
+    private val sendLock = Any()
+    private var sigOut: DataOutputStream? = null
+    /** Set once the PC's hello arrives; until then we send nothing (old receivers don't read). */
+    @Volatile private var statusSupported = false
+    /** Invoked when the PC announces status support, so the service can push the first value at once. */
+    @Volatile var onStatusChannelReady: (() -> Unit)? = null
+
+    /** Counts capture frames + observes the real capture geometry, at one atomic add per frame. */
+    private var captureStats: CountingCapturerObserver? = null
+    private val statsSampler = Runnable { pollWebrtcStats() }
+
     fun start() {
         if (!started.compareAndSet(false, true)) return
         worker = Thread {
@@ -146,13 +158,23 @@ class WebRtcSender(
         }
 
         // Camera → H.264 video track (added after audio to match the PC offer's m-line order).
+        // The track must exist before setRemoteDescription (Unified Plan matches it to the offer's
+        // video m-line), but the CAMERA does not have to be running yet — see startCapture() below.
         if (withVideo) startCamera(peer, egl)
 
         // --- signaling handshake over TCP ---
         onState(State.CONNECTING)
         val s = connectSignaling()
         if (closed.get()) return
+        // Open the camera only now. connectSignaling() retries every 2 s for as long as the stream is
+        // up (the service's idle guard allows 5 minutes), and until this point there is nowhere for a
+        // frame to go — so starting capture earlier ran the sensor, ISP and GPU texture path at full
+        // rate, throwing every frame away. This is the single largest avoidable draw on the Wi-Fi
+        // path when the desktop app isn't listening yet (the "reconnect to last PC" flow). It costs no
+        // user-visible latency: camera open overlaps the SDP exchange, ICE and the DTLS handshake.
+        startCapture()
         val out = DataOutputStream(s.getOutputStream())
+        sigOut = out
         val inp = DataInputStream(s.getInputStream())
         sendMsg(out, 'S', secret.toByteArray(Charsets.UTF_8))
 
@@ -170,13 +192,18 @@ class WebRtcSender(
         val local = pc?.localDescription ?: throw IllegalStateException("no local description")
         sendMsg(out, 'A', local.description.toByteArray(Charsets.UTF_8))
         Log.i(TAG, "webrtc: answer sent — media negotiating")
+        Diag.event("transport_connected", "transport=webrtc", "sdpBytes=${local.description.length}")
+        if (Diag.on) Diag.addSampler(statsSampler)
 
-        // Keep the signaling socket open only to notice the PC stopping: it closes the socket on Stop,
-        // so a blocking read returning EOF is our cue to shut the stream down at once.
+        // The signaling socket stays open for the rest of the session. Historically it was only read
+        // to notice EOF (the PC pressing Stop); it is now also the control channel: the PC may send a
+        // hello ('V'), a problem mark ('M') or a keyframe hint ('K'), and we push device status ('B')
+        // back on it. Anything unknown is skipped by length, so either side can add message types.
         try {
             s.soTimeout = 0
             while (!closed.get()) {
-                if (inp.read() < 0) break   // PC closed the signaling channel
+                val (t, payload) = recvMsg(inp) ?: break   // EOF: PC closed the signaling channel
+                handleControl(t, payload)
             }
         } catch (e: Exception) {
             // socket closed under us — treat as PC gone
@@ -188,8 +215,52 @@ class WebRtcSender(
         }
     }
 
+    /** PC → phone control messages on the signaling socket. Unknown types are ignored by design. */
+    private fun handleControl(type: Char, payload: ByteArray) {
+        when (type) {
+            PhoneStatus.MSG_HELLO -> {
+                val body = String(payload, Charsets.UTF_8)
+                if (PhoneStatus.helloSupportsStatus(body)) {
+                    statusSupported = true
+                    Diag.event("status_channel_ready", "peer=pc")
+                    runCatching { onStatusChannelReady?.invoke() }
+                }
+            }
+            PhoneStatus.MSG_MARK -> {
+                Diag.c.problemMarks.incrementAndGet()
+                // Correlates the PC operator's "I can see it now" with this phone's event stream.
+                Diag.event("problem_mark", "source=pc", "note=" + String(payload, Charsets.UTF_8).take(64))
+            }
+            PhoneStatus.MSG_KEYFRAME -> {
+                // WebRTC signals keyframe requests natively over RTCP (PLI); this is only informational.
+                Diag.c.keyframeRequests.incrementAndGet()
+                Diag.deep("keyframe_requested", "source=pc-control")
+            }
+            else -> Diag.deep("control_unknown", "type=$type", "len=${payload.size}")
+        }
+    }
+
+    /**
+     * Push one device-status message. No-op until the PC says it understands them, so an older
+     * receiver never sees bytes it would not read. One ~90-byte write per minute.
+     */
+    fun sendStatus(json: String): Boolean {
+        if (!statusSupported || closed.get()) return false
+        val out = sigOut ?: return false
+        return runCatching {
+            sendMsg(out, PhoneStatus.MSG_STATUS, json.toByteArray(Charsets.UTF_8))
+            Diag.c.statusPushes.incrementAndGet()
+            true
+        }.getOrElse {
+            Diag.c.socketWriteErrors.incrementAndGet()
+            false
+        }
+    }
+
     fun stop() {
         if (!closed.compareAndSet(false, true)) return
+        Diag.removeSampler(statsSampler)
+        statusSupported = false
         runCatching { socket?.close() }
         worker?.interrupt()
         // Tear down WebRTC off the caller's thread — dispose() blocks on WebRTC's threads.
@@ -221,9 +292,14 @@ class WebRtcSender(
         surfaceHelper = helper
         val vsrc = factory!!.createVideoSource(false)   // isScreencast = false
         videoSource = vsrc
-        capturer.initialize(helper, appCtx, vsrc.capturerObserver)
-        // The selected Quality preset caps capture; WebRTC then sheds resolution under congestion.
-        capturer.startCapture(videoW, videoH, videoFps)
+        // Count capture frames and record the geometry the camera ACTUALLY produced (which can differ
+        // from the request — Camera2Enumerator snaps to a supported format). One atomic add per frame.
+        // Only inserted when diagnostics are on, so the production capture path is unchanged.
+        val obs = if (Diag.on) CountingCapturerObserver(vsrc.capturerObserver).also { captureStats = it }
+                  else vsrc.capturerObserver
+        capturer.initialize(helper, appCtx, obs)
+        Diag.event("camera_prepared", "transport=webrtc", "cam=$camName",
+            "reqW=$videoW", "reqH=$videoH", "reqFps=$videoFps")
         val vtrack = factory!!.createVideoTrack("cam0", vsrc).apply { setEnabled(true) }
         videoTrack = vtrack
         val sender = peer.addTrack(vtrack, listOf("pcam"))
@@ -240,6 +316,18 @@ class WebRtcSender(
             sender.parameters = p
         }
         Log.i(TAG, "webrtc: camera track added ($camName, ${videoW}x${videoH}@${videoFps})")
+    }
+
+    /**
+     * Actually open the camera and start delivering frames. Split out of [startCamera] so the sensor
+     * only spins up once we have a PC on the other end of the signaling socket. The selected Quality
+     * preset caps capture; WebRTC then sheds resolution under congestion.
+     */
+    private fun startCapture() {
+        val capturer = videoCapturer ?: return
+        runCatching { capturer.startCapture(videoW, videoH, videoFps) }
+            .onSuccess { Diag.event("camera_started", "transport=webrtc", "w=$videoW", "h=$videoH", "fps=$videoFps") }
+            .onFailure { Log.e(TAG, "webrtc: startCapture failed", it); Diag.event("camera_start_failed", "err=${it.javaClass.simpleName}") }
     }
 
     /** Toggle front/back camera on the running capture (no-op in audio-only mode). */
@@ -268,11 +356,100 @@ class WebRtcSender(
         throw InterruptedException("WebRTC sender stopped")
     }
 
+    /**
+     * Pass-through [org.webrtc.CapturerObserver] that only counts. Sits between the capturer and the
+     * VideoSource so we can report *observed* capture fps/resolution instead of the requested one —
+     * the single most useful number for "is the camera doing more work than we transmit?".
+     */
+    private class CountingCapturerObserver(
+        private val delegate: org.webrtc.CapturerObserver,
+    ) : org.webrtc.CapturerObserver {
+        @Volatile var lastW = 0
+        @Volatile var lastH = 0
+        override fun onCapturerStarted(success: Boolean) {
+            Diag.event("camera_capture_started", "ok=${if (success) 1 else 0}")
+            delegate.onCapturerStarted(success)
+        }
+        override fun onCapturerStopped() {
+            Diag.event("camera_capture_stopped")
+            delegate.onCapturerStopped()
+        }
+        override fun onFrameCaptured(frame: org.webrtc.VideoFrame) {
+            if (Diag.on) {   // one volatile read when diagnostics are off; nothing else
+                Diag.c.cameraFrames.incrementAndGet()
+                lastW = frame.buffer.width; lastH = frame.buffer.height
+            }
+            delegate.onFrameCaptured(frame)
+        }
+    }
+
+    /**
+     * Pull the WebRTC stack's own statistics rather than reinventing them (W3C `RTCStatsReport`).
+     * Runs on the diagnostics sample tick (30 s by default), so the cost is one async collection per
+     * half-minute. `outbound-rtp` tells us what we really encoded and sent, `remote-inbound-rtp`
+     * carries the PC's loss/jitter/RTT report, and `encoderImplementation` proves hardware vs software.
+     */
+    private fun pollWebrtcStats() {
+        val peer = pc ?: return
+        runCatching {
+            peer.getStats { report ->
+                val sb = StringBuilder(220)
+                var any = false
+                for (s in report.statsMap.values) {
+                    val m = s.members
+                    when (s.type) {
+                        "outbound-rtp" -> {
+                            any = true
+                            val kind = (m["kind"] ?: m["mediaType"])?.toString() ?: "?"
+                            sb.append(" out.").append(kind).append("[")
+                            sb.append("bytes=").append(m["bytesSent"])
+                            sb.append(" pkts=").append(m["packetsSent"])
+                            if (kind == "video") {
+                                sb.append(" frames=").append(m["framesEncoded"])
+                                sb.append(" key=").append(m["keyFramesEncoded"])
+                                sb.append(" fps=").append(m["framesPerSecond"])
+                                sb.append(" ").append(m["frameWidth"]).append("x").append(m["frameHeight"])
+                                sb.append(" target=").append(m["targetBitrate"])
+                                sb.append(" limit=").append(m["qualityLimitationReason"])
+                                sb.append(" enc=").append(m["encoderImplementation"])
+                                sb.append(" pli=").append(m["pliCount"])
+                                sb.append(" nack=").append(m["nackCount"])
+                                sb.append(" fir=").append(m["firCount"])
+                                sb.append(" encTime=").append(m["totalEncodeTime"])
+                            }
+                            sb.append("]")
+                        }
+                        "remote-inbound-rtp" -> {
+                            any = true
+                            sb.append(" rin[").append("lost=").append(m["packetsLost"])
+                            sb.append(" frac=").append(m["fractionLost"])
+                            sb.append(" jitter=").append(m["jitter"])
+                            sb.append(" rtt=").append(m["roundTripTime"]).append("]")
+                        }
+                        "candidate-pair" -> {
+                            if (m["nominated"] == true || m["state"] == "succeeded") {
+                                any = true
+                                sb.append(" pair[rtt=").append(m["currentRoundTripTime"])
+                                sb.append(" avail=").append(m["availableOutgoingBitrate"]).append("]")
+                            }
+                        }
+                    }
+                }
+                if (any) {
+                    val cs = captureStats
+                    if (cs != null) sb.append(" capGeom=").append(cs.lastW).append("x").append(cs.lastH)
+                    Diag.event("webrtc_stats", sb.toString().trim())
+                }
+            }
+        }
+    }
+
     // --- PeerConnection.Observer ---
     private val observer = object : PeerConnection.Observer {
         override fun onSignalingChange(s: PeerConnection.SignalingState?) {}
         override fun onIceConnectionChange(state: PeerConnection.IceConnectionState?) {
             Log.i(TAG, "webrtc ice: $state")
+            Diag.event("ice_state", "state=$state")
             when (state) {
                 PeerConnection.IceConnectionState.CONNECTED,
                 PeerConnection.IceConnectionState.COMPLETED -> onState(State.CONNECTED)
@@ -332,11 +509,16 @@ class WebRtcSender(
     }
 
     // --- PCAM3 framing (mirrors webrtc_receiver.cpp): [type][4-byte BE len][payload] ---
+    // Serialized: the handshake writes come from the worker thread and status pushes from the
+    // service's status thread. They cannot actually overlap (statusSupported is only set after the
+    // answer is sent), but framing corruption is not a failure mode worth reasoning about twice.
     private fun sendMsg(out: DataOutputStream, type: Char, payload: ByteArray) {
-        out.writeByte(type.code)
-        out.writeInt(payload.size)     // DataOutputStream.writeInt is big-endian
-        out.write(payload)
-        out.flush()
+        synchronized(sendLock) {
+            out.writeByte(type.code)
+            out.writeInt(payload.size)     // DataOutputStream.writeInt is big-endian
+            out.write(payload)
+            out.flush()
+        }
     }
 
     private fun recvMsg(inp: DataInputStream): Pair<Char, ByteArray>? {

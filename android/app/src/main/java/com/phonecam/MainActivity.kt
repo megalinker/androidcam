@@ -40,6 +40,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var idleHint: View
     private lateinit var urlText: TextView
     private lateinit var pcStatus: TextView
+    private lateinit var diagSwitch: com.google.android.material.materialswitch.MaterialSwitch
+    private lateinit var diagHint: TextView
+    private lateinit var diagShareBtn: MaterialButton
 
     private val prefs by lazy { getSharedPreferences("phonecam", MODE_PRIVATE) }
     private val ui = Handler(Looper.getMainLooper())
@@ -50,6 +53,8 @@ class MainActivity : AppCompatActivity() {
     // A USB request pushed by the PC over adb (port, mode, quality), held across the permission prompt.
     private var pendingUsb: Triple<Int, String?, String?>? = null
     private var pendingRawMic = false   // raw-mic (no AEC/NS) flag from the PC's USB launch intent (F-12)
+    private var pendingDiag = false     // diagnostics for this session (PC/test-script override)
+    private var pendingDeepDiag = false
     private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
         result.contents?.let { onScanned(it) }
     }
@@ -86,6 +91,21 @@ class MainActivity : AppCompatActivity() {
         urlText.setOnClickListener { copyUrl() }
         findViewById<MaterialButton>(R.id.switchCamBtn).setOnClickListener { switchCamera() }
 
+        diagSwitch = findViewById(R.id.diagSwitch)
+        diagHint = findViewById(R.id.diagHint)
+        diagShareBtn = findViewById(R.id.diagShareBtn)
+        diagSwitch.isChecked = prefs.getBoolean(StreamService.PREF_DIAG, false)
+        updateDiagUi()
+        diagSwitch.setOnCheckedChangeListener { _, on ->
+            prefs.edit().putBoolean(StreamService.PREF_DIAG, on).apply()
+            updateDiagUi()
+            if (StreamService.isRunning) {
+                Toast.makeText(this,
+                    "Takes effect on the next stream — stop and reconnect to apply.", Toast.LENGTH_LONG).show()
+            }
+        }
+        diagShareBtn.setOnClickListener { shareDiagnostics() }
+
         handleUsbIntent(intent)   // the PC may have launched us over adb to start USB streaming
     }
 
@@ -107,6 +127,11 @@ class MainActivity : AppCompatActivity() {
             intent.getStringExtra(KEY_MODE),
             intent.getStringExtra(KEY_QUALITY))
         pendingRawMic = intent.getBooleanExtra(StreamService.EXTRA_RAW_MIC, false)
+        // The desktop app / test scripts can turn diagnostics on for this session without touching the
+        // phone; absent the extras we fall back to the in-app switch (default off).
+        pendingDiag = intent.getBooleanExtra(StreamService.EXTRA_DIAG,
+            prefs.getBoolean(StreamService.PREF_DIAG, false))
+        pendingDeepDiag = intent.getBooleanExtra(StreamService.EXTRA_DEEP_DIAG, false)
         if (ensurePermissions()) beginUsb()
     }
 
@@ -132,6 +157,8 @@ class MainActivity : AppCompatActivity() {
             putExtra(StreamService.EXTRA_MODE, selectedMode().name)
             putExtra(StreamService.EXTRA_QUALITY, selectedQuality().name)
             putExtra(StreamService.EXTRA_RAW_MIC, pendingRawMic)
+            putExtra(StreamService.EXTRA_DIAG, pendingDiag)
+            putExtra(StreamService.EXTRA_DEEP_DIAG, pendingDeepDiag)
         }
         ContextCompat.startForegroundService(this, svc)
         Toast.makeText(this, "USB — streaming to the PC…", Toast.LENGTH_SHORT).show()
@@ -202,6 +229,38 @@ class MainActivity : AppCompatActivity() {
             putExtra(StreamService.EXTRA_SIG_SECRET, wr.secret)
         }
         ContextCompat.startForegroundService(this, intent)
+    }
+
+    /** Reflect the diagnostics switch in the hint + share affordance. */
+    private fun updateDiagUi() {
+        val on = diagSwitch.isChecked
+        diagHint.text = if (on)
+            "On. Samples battery, thermals, CPU and stream rates every 30 s while streaming. " +
+            "Logged under the tag PhoneCamDiag (adb logcat -s PhoneCamDiag) and kept in the app's " +
+            "own files, capped so it can never fill storage. Turn it off when you're done measuring."
+        else
+            "Off. Turn on only while measuring — it samples power, thermals and CPU every 30 s and " +
+            "uses a little battery itself."
+        diagShareBtn.visibility = if (on) View.VISIBLE else View.GONE
+    }
+
+    /** Hand the last session's events to any share target (mail, notes, chat) as plain text. */
+    private fun shareDiagnostics() {
+        val events = Diag.recentEvents()
+        val body = if (events.isEmpty())
+            "No PhoneCam diagnostics recorded yet — turn the switch on, run a stream, then share."
+        else buildString {
+            append("PhoneCam diagnostics\n")
+            append("app=").append(BuildConfig.VERSION_NAME)
+            append(" device=").append(Build.MANUFACTURER).append('/').append(Build.MODEL)
+            append(" sdk=").append(Build.VERSION.SDK_INT).append("\n\n")
+            for (e in events) append(e).append('\n')
+        }
+        startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "PhoneCam diagnostics")
+            putExtra(Intent.EXTRA_TEXT, body)
+        }, "Share diagnostics"))
     }
 
     private fun copyUrl() {

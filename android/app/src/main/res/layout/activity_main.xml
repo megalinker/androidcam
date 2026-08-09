@@ -184,6 +184,38 @@
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
+            <!-- Diagnostics: OFF by default. Recording costs a little battery itself (a 30 s sampler
+                 + logging), so it is opt-in and clearly labelled as a measurement tool. -->
+            <TextView style="@style/PcSectionLabel" android:text="DIAGNOSTICS" android:layout_marginTop="24dp" />
+
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/diagSwitch"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Record battery diagnostics"
+                android:textColor="@color/pc_text"
+                android:textSize="15sp" />
+
+            <TextView
+                android:id="@+id/diagHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Off. Turn on only while measuring — it samples power, thermals and CPU every 30 s and uses a little battery itself."
+                android:textColor="@color/pc_muted"
+                android:textSize="12sp"
+                android:lineSpacingExtra="2dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/diagShareBtn"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:visibility="gone"
+                android:text="Share diagnostics" />
+
             <TextView
                 android:id="@+id/idleHint"
                 android:layout_width="match_parent"
