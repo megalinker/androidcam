@@ -75,9 +75,21 @@ public class PhoneCamGui : Form
     static readonly int[] BoostDb = { 0, 6, 12, 18 };   // Off / Low / Med / High
     // EQ dropdown index -> receiver preset name; index 5 ("custom") uses customEq instead.
     static readonly string[] EqPreset = { "", "clarity", "warm", "bright", "podcast", "clarity+", "warm+", "bright+", "podcast+", "custom" };
-    Button btnStart;
+    Button btnStart, btnMark;
     Label lblStatus, lblDot, tip, micLabel;
-    Panel preview, micMeter;
+    Panel preview, micMeter, battPanel;
+    CheckBox cbPhoneDiag;
+    // Phone battery, fed by the receiver's [status] lines (see phone_status.h). -1 = not reported.
+    volatile int battPct = -1;
+    volatile int battCharging = -1;          // -1 unknown, 0 on battery, 1 charging
+    // Written by the receiver's stderr thread, read by the UI thread — kept as ticks behind
+    // Interlocked so a 64-bit DateTime can never be read half-updated.
+    long battAtTicks = 0;
+    bool battStaleShown = false;             // so OnTick only repaints when the state actually flips
+    static readonly Font BattFont = new Font("Segoe UI", 8.5f);   // hoisted: PaintBattery must not leak a GDI font per repaint
+    // A reading older than this is shown as stale: the phone pushes once a minute, so three missed
+    // heartbeats means the link, not the battery, is the thing that changed.
+    static readonly TimeSpan BattStale = TimeSpan.FromMinutes(3);
     Label previewHint, qrLabel, vpnHint;
     PictureBox qrBox;
     volatile float micLevel = 0f;   // 0..1 peak from the receiver's [level] lines, drives the mic meter
@@ -93,7 +105,7 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, settingsPath, logPath;
-    const string Version = "0.6.0";
+    const string Version = "0.6.1";
     const int WebrtcSigPort = 8891;   // TCP port the PC's WebRTC PCAM3 signaling listener binds
     const int UsbPort = 27183;        // loopback port we adb-forward to the phone's USB stream socket
     string adbExe;                    // bundled/system adb, or null — drives the USB path
@@ -156,7 +168,7 @@ public class PhoneCamGui : Form
         Text = "PhoneCam v" + Version;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(744, 600);
+        ClientSize = new Size(744, 694);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Bg; ForeColor = Fg;
         Font = new Font("Segoe UI", 9.5f);
@@ -215,29 +227,45 @@ public class PhoneCamGui : Form
         tips.SetToolTip(cbFlipV, "Flip the image top ↕ bottom (upside-down).");
         tips.SetToolTip(btnSwitchCam, "Switch between the phone's front and back camera.");
 
-        // STATUS — live state, mic meter, and the "pick me in your call app" tip.
-        AddSection("Status", 436);
-        lblDot = new Label { Text = "●", ForeColor = Sub, Location = new Point(24, 462), AutoSize = true, Font = new Font("Segoe UI", 11f) };
-        lblStatus = new Label { Text = "Not connected", ForeColor = Sub, Location = new Point(44, 464), AutoSize = true, MaximumSize = new Size(196, 0) };
+        // STATUS — live state, phone battery, mic meter, and the "pick me in your call app" tip.
+        AddSection("Status", 430);
+        lblDot = new Label { Text = "●", ForeColor = Sub, Location = new Point(24, 456), AutoSize = true, Font = new Font("Segoe UI", 11f) };
+        lblStatus = new Label { Text = "Not connected", ForeColor = Sub, Location = new Point(44, 458), AutoSize = true, MaximumSize = new Size(196, 0) };
         Controls.Add(lblDot); Controls.Add(lblStatus);
-        micLabel = new Label { Text = "Mic", ForeColor = Sub, Location = new Point(24, 494), AutoSize = true, Font = new Font("Segoe UI", 8.25f), Visible = false };
-        micMeter = new Panel { Location = new Point(56, 494), Size = new Size(184, 14), BackColor = Color.FromArgb(20, 22, 25), Visible = false };
+        // Phone battery — drawn in the same owner-drawn style as the mic meter so it reads as part of
+        // the status block rather than something bolted on.
+        battPanel = new Panel { Location = new Point(24, 484), Size = new Size(216, 20), BackColor = Bg, Visible = false };
+        battPanel.Paint += PaintBattery;
+        Controls.Add(battPanel);
+        micLabel = new Label { Text = "Mic", ForeColor = Sub, Location = new Point(24, 510), AutoSize = true, Font = new Font("Segoe UI", 8.25f), Visible = false };
+        micMeter = new Panel { Location = new Point(56, 510), Size = new Size(184, 14), BackColor = Color.FromArgb(20, 22, 25), Visible = false };
         micMeter.Paint += PaintMeter;
         Controls.Add(micLabel); Controls.Add(micMeter);
-        tip = new Label { Text = TipText(false), ForeColor = Sub, Location = new Point(24, 518), AutoSize = true, MaximumSize = new Size(216, 0) };
+        tip = new Label { Text = TipText(false), ForeColor = Sub, Location = new Point(24, 534), AutoSize = true, MaximumSize = new Size(216, 0) };
         Controls.Add(tip);
-        linkDiag = new LinkLabel { Text = "Copy troubleshooting info", Location = new Point(24, 568), AutoSize = true, LinkColor = AccentText, ActiveLinkColor = AccentText, DisabledLinkColor = Sub, LinkBehavior = LinkBehavior.AlwaysUnderline, Font = new Font("Segoe UI", 9f) };
+
+        // TROUBLESHOOTING — the artifact marker and the phone-side measurement switch.
+        btnMark = new Button { Text = "Mark video problem", Location = new Point(24, 600), Size = new Size(216, 28), FlatStyle = FlatStyle.Flat, BackColor = Card, ForeColor = Fg, Font = new Font("Segoe UI", 8.5f), Enabled = false };
+        btnMark.FlatAppearance.BorderColor = Color.FromArgb(70, 74, 82);
+        btnMark.Click += (s, e) => MarkProblem();
+        Controls.Add(btnMark);
+        cbPhoneDiag = Check("Record phone diagnostics", 24, 634);
+        Controls.Add(cbPhoneDiag);
+        linkDiag = new LinkLabel { Text = "Copy troubleshooting info", Location = new Point(24, 662), AutoSize = true, LinkColor = AccentText, ActiveLinkColor = AccentText, DisabledLinkColor = Sub, LinkBehavior = LinkBehavior.AlwaysUnderline, Font = new Font("Segoe UI", 9f) };
         linkDiag.LinkClicked += (s, e) => CopyDiagnostics();
         Controls.Add(linkDiag);
+        tips.SetToolTip(battPanel, "Your phone's remaining battery, reported by the PhoneCam app about once a minute.");
+        tips.SetToolTip(btnMark, "Press the moment you see a glitch in the video. It stamps the log with the packet loss, keyframe and decoder state at that instant — no video is recorded.");
+        tips.SetToolTip(cbPhoneDiag, "Ask the phone to record battery, thermal and CPU samples during the next USB session.\nUseful for measuring; costs a little battery itself, so leave it off day to day.\nOver Wi-Fi, turn it on in the app on the phone instead.");
 
         // Right: embedded live preview (also hosts the pairing QR before a phone connects)
-        preview = new Panel { Location = new Point(260, 84), Size = new Size(468, 486), BackColor = Color.FromArgb(12, 13, 15), BorderStyle = BorderStyle.None };
+        preview = new Panel { Location = new Point(260, 84), Size = new Size(468, 578), BackColor = Color.FromArgb(12, 13, 15), BorderStyle = BorderStyle.None };
         preview.Paint += (s, e) => { using (var pen = new Pen(Line)) e.Graphics.DrawRectangle(pen, 0, 0, preview.Width - 1, preview.Height - 1); };
         previewHint = new Label { Text = "Your phone's camera will show here once you connect.", ForeColor = Sub, BackColor = Color.FromArgb(12, 13, 15), AutoSize = true, Location = new Point(16, 16) };
-        qrLabel = new Label { Text = "Scan this code with the PhoneCam app on your phone.\nKeep your phone on the same Wi-Fi as this PC.", ForeColor = Fg, BackColor = Color.FromArgb(12, 13, 15), Size = new Size(468, 48), Location = new Point(0, 88), TextAlign = ContentAlignment.MiddleCenter, Visible = false };
-        qrBox = new PictureBox { Location = new Point(104, 150), Size = new Size(260, 260), SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.White, Visible = false };
+        qrLabel = new Label { Text = "Scan this code with the PhoneCam app on your phone.\nKeep your phone on the same Wi-Fi as this PC.", ForeColor = Fg, BackColor = Color.FromArgb(12, 13, 15), Size = new Size(468, 48), Location = new Point(0, 130), TextAlign = ContentAlignment.MiddleCenter, Visible = false };
+        qrBox = new PictureBox { Location = new Point(104, 192), Size = new Size(260, 260), SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.White, Visible = false };
         vpnHint = new Label { Text = "Nothing yet? If you use a VPN, it may be hiding your phone.\nTurn the VPN off on the phone and PC, then try again.",
-            ForeColor = Amber, BackColor = Color.FromArgb(12, 13, 15), Size = new Size(468, 46), Location = new Point(0, 424),
+            ForeColor = Amber, BackColor = Color.FromArgb(12, 13, 15), Size = new Size(468, 46), Location = new Point(0, 470),
             TextAlign = ContentAlignment.MiddleCenter, Font = new Font("Segoe UI", 8.5f), Visible = false };
         preview.Controls.Add(previewHint); preview.Controls.Add(qrLabel); preview.Controls.Add(qrBox); preview.Controls.Add(vpnHint);
         Controls.Add(preview);
@@ -276,6 +304,85 @@ public class PhoneCamGui : Form
         using (var pen = new Pen(Color.FromArgb(60, 64, 72)))
         { g.DrawLine(pen, 1 + (int)(iw * 0.7f), 1, 1 + (int)(iw * 0.7f), 1 + ih); g.DrawLine(pen, 1 + (int)(iw * 0.9f), 1, 1 + (int)(iw * 0.9f), 1 + ih); }
         using (var bp = new Pen(Line)) g.DrawRectangle(bp, 0, 0, w - 1, h - 1);
+    }
+
+    // --- phone battery indicator ---
+
+    /// <summary>
+    /// Draws "Phone battery  73% ⚡" with a small battery glyph, in the app's own palette. Four states:
+    /// live reading, charging, stale (the phone stopped reporting), and not reported at all (an older
+    /// phone build, or one that hasn't sent its first heartbeat yet).
+    /// </summary>
+    void PaintBattery(object sender, PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        int pct = battPct, chg = battCharging;
+        bool stale = pct >= 0 && BattAge() > BattStale;
+        int h = battPanel.ClientSize.Height;
+        int by = (h - 11) / 2;
+        var body = new Rectangle(0, by, 22, 11);
+
+        Color shell = stale ? Sub : Color.FromArgb(120, 126, 134);
+        Color fill = pct < 0 || stale ? Sub
+                   : chg == 1 ? Green
+                   : pct <= 15 ? Color.FromArgb(226, 96, 96)
+                   : pct <= 30 ? Amber : Green;
+
+        using (var pen = new Pen(shell)) g.DrawRectangle(pen, body);
+        using (var b = new SolidBrush(shell)) g.FillRectangle(b, body.Right + 1, by + 3, 2, 5);   // terminal nub
+        if (pct >= 0)
+        {
+            int w = (int)Math.Round((body.Width - 4) * (pct / 100.0));
+            if (w > 0) using (var b = new SolidBrush(fill)) g.FillRectangle(b, body.X + 2, by + 2, w, body.Height - 3);
+        }
+
+        string text = pct < 0 ? "Phone battery  —"
+                    : "Phone battery  " + pct + "%" + (chg == 1 ? "  ⚡" : "") + (stale ? "  (no update)" : "");
+        TextRenderer.DrawText(g, text, BattFont,
+            new Rectangle(30, 0, battPanel.ClientSize.Width - 30, h),
+            pct < 0 || stale ? Sub : Fg,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+    }
+
+    /// <summary>How long ago the last battery reading arrived (TimeSpan.MaxValue if there is none).</summary>
+    TimeSpan BattAge()
+    {
+        long t = Interlocked.Read(ref battAtTicks);
+        return t == 0 ? TimeSpan.MaxValue : (DateTime.Now - new DateTime(t));
+    }
+
+    /// <summary>Parse one `[status] battery=73 charging=1 plug=2 tempC=31.2 sid=…` line from the receiver.</summary>
+    void OnPhoneStatus(string line)
+    {
+        int pct = -1, chg = -1;
+        foreach (var tok in line.Split(' '))
+        {
+            var kv = tok.Split(new[] { '=' }, 2);
+            if (kv.Length != 2) continue;
+            int v;
+            if (kv[0] == "battery" && int.TryParse(kv[1], out v)) pct = v;
+            else if (kv[0] == "charging" && int.TryParse(kv[1], out v)) chg = v;
+        }
+        if (pct < 0 && chg < 0) return;
+        battPct = pct; battCharging = chg;
+        Interlocked.Exchange(ref battAtTicks, DateTime.Now.Ticks);
+        try { if (battPanel.IsHandleCreated) battPanel.BeginInvoke((Action)(() => { battPanel.Visible = running; battPanel.Invalidate(); })); }
+        catch { }
+    }
+
+    /// <summary>
+    /// "I can see the glitch right now." Sends a marker to the receiver, which stamps its log with the
+    /// packet-loss / keyframe / decoder state at that instant and forwards it to the phone. No video is
+    /// recorded — the point is a synchronised timestamp on both sides.
+    /// </summary>
+    void MarkProblem()
+    {
+        if (recv == null || !running) return;
+        string note = "video artifact seen at " + DateTime.Now.ToString("HH:mm:ss.fff");
+        SendRecv("mark " + note);
+        Log("MARK: " + note);
+        SetStatus(Amber, "Marked — the details are in “Copy troubleshooting info”.");
     }
 
     // --- system tray + start-with-Windows ---
@@ -363,6 +470,7 @@ public class PhoneCamGui : Form
         cbBoost.Enabled = on && cbMic.Checked;
         cbEq.Enabled = on && cbMic.Checked;
         cbRawMic.Enabled = on && cbMic.Checked;
+        cbPhoneDiag.Enabled = on;   // applied when the phone app is launched, i.e. at Start
     }
 
     // Timestamped rolling log — the source for "Copy diagnostics" and a file the user can share.
@@ -385,6 +493,10 @@ public class PhoneCamGui : Form
         sb.AppendLine("time: " + DateTime.Now);
         sb.AppendLine("os: " + Environment.OSVersion + (Environment.Is64BitOperatingSystem ? " x64" : " x86"));
         sb.AppendLine("receiver: " + (receiverExe ?? "NOT FOUND"));
+        sb.AppendLine("phone battery: " + (battPct < 0 ? "not reported"
+            : battPct + "%" + (battCharging == 1 ? " (charging)" : "") +
+              " as of " + (Interlocked.Read(ref battAtTicks) == 0 ? "never"
+                            : new DateTime(Interlocked.Read(ref battAtTicks)).ToString("HH:mm:ss"))));
         sb.AppendLine("chosen LAN IP: " + (LocalIPv4() ?? "none"));
         try
         {
@@ -484,6 +596,7 @@ public class PhoneCamGui : Form
         if (running || reconnecting || starting) return;
         bool useMic = cbMic.Checked;
         bool rawMic = !cbRawMic.Checked;   // "Phone-call noise filter" OFF (unchecked) = raw/fuller mic. Captured on the UI thread. (F-12)
+        bool phoneDiag = cbPhoneDiag.Checked;   // opt-in phone-side measurement for this session
         if (!PrepareMic(ref useMic)) return;
         manualStop = false; reconnecting = false; wentLive = false; reconnectAttempts = 0;
         webrtcMode = false; usbMode = false;
@@ -498,7 +611,7 @@ public class PhoneCamGui : Form
             // worker thread — no UI access here
             string dev = (adbExe != null) ? AdbDevice() : null;
             bool usbReady = false; string usbFail = null;
-            if (dev != null) usbReady = UsbAdbSetup(useMic, rawMic, out usbFail);
+            if (dev != null) usbReady = UsbAdbSetup(useMic, rawMic, phoneDiag, out usbFail);
             try
             {
                 BeginInvoke((Action)(() =>
@@ -590,7 +703,7 @@ public class PhoneCamGui : Form
     /// phone, and launch its app in USB mode. Returns false (with a reason) if the forward can't be set,
     /// so the caller can fall back to Wi-Fi. The receiver launch + UI updates happen on the UI thread
     /// in StartReceiver's continuation. (F-18)</summary>
-    bool UsbAdbSetup(bool useMic, bool rawMic, out string fail)
+    bool UsbAdbSetup(bool useMic, bool rawMic, bool phoneDiag, out string fail)
     {
         fail = null; string outp;
         AdbRun("forward --remove tcp:" + UsbPort, out outp, 4000);   // clear any stale forward
@@ -601,7 +714,7 @@ public class PhoneCamGui : Form
         AdbRun("shell input keyevent KEYCODE_WAKEUP", out outp, 3000);
         // Cam+Mic when the mic is wanted, camera-only otherwise (the phone honors this mode).
         string mode = useMic ? "BOTH" : "CAMERA_ONLY";
-        if (!AdbRun("shell am start -n com.phonecam/.MainActivity -a com.phonecam.action.USB --ei usbPort " + UsbPort + " --es mode " + mode + " --ez rawMic " + (rawMic ? "true" : "false"), out outp, 6000))
+        if (!AdbRun("shell am start -n com.phonecam/.MainActivity -a com.phonecam.action.USB --ei usbPort " + UsbPort + " --es mode " + mode + " --ez rawMic " + (rawMic ? "true" : "false") + " --ez diag " + (phoneDiag ? "true" : "false"), out outp, 6000))
             Log("adb am start returned: " + outp);   // continue anyway; receiver --usb retries the connection
         return true;
     }
@@ -645,6 +758,9 @@ public class PhoneCamGui : Form
                 }
                 return;
             }
+            // Phone battery heartbeat (~1/min). Logged as well as displayed: it is genuinely useful
+            // context in a troubleshooting paste, and one line a minute cannot flood anything.
+            if (d.StartsWith("[status]")) OnPhoneStatus(d);
             Log("[recv] " + Redact(d));   // mask the password / passphrase if FFmpeg echoes the URL
             if (d.IndexOf("[video]", StringComparison.OrdinalIgnoreCase) >= 0) { videoSeen = true; streamDropped = false; }
             if (d.IndexOf("[audio] rendering", StringComparison.OrdinalIgnoreCase) >= 0) { audioSeen = true; streamDropped = false; }
@@ -658,6 +774,9 @@ public class PhoneCamGui : Form
         catch (Exception ex) { Log("receiver start FAILED: " + ex.Message); MessageBox.Show("Failed to start receiver: " + ex.Message, "PhoneCam"); StopReceiver(); return; }
 
         running = true; embedded = IntPtr.Zero;
+        battPct = -1; battCharging = -1; Interlocked.Exchange(ref battAtTicks, 0);
+        battPanel.Visible = true; battPanel.Invalidate();
+        btnMark.Enabled = true;
         // Sync preview-visible state to the receiver now that it's running (F-34): on the -tray autostart
         // path the window is already minimized before the receiver launched, so OnResize's earlier
         // "preview 0" reached no process. Re-send it so the idle-skip engages while hidden in the tray.
@@ -870,6 +989,10 @@ public class PhoneCamGui : Form
             lastPreviewSize = preview.ClientSize;
         }
 
+        // Repaint the battery only when its "no update" state actually flips, not every tick.
+        bool battStale = battPct >= 0 && BattAge() > BattStale;
+        if (battStale != battStaleShown) { battStaleShown = battStale; battPanel.Invalidate(); }
+
         bool hasVideo = videoSeen || embedded != IntPtr.Zero;
         // Back to a live feed → this URL is good; refill the reconnect budget for the next blip.
         if (hasVideo || audioSeen) { wentLive = true; reconnectAttempts = 0; }
@@ -919,6 +1042,9 @@ public class PhoneCamGui : Form
         embedded = IntPtr.Zero;
         micLevel = 0f;
         if (micMeter != null) { micMeter.Visible = false; micLabel.Visible = false; }
+        battPct = -1; battCharging = -1; Interlocked.Exchange(ref battAtTicks, 0);
+        if (battPanel != null) battPanel.Visible = false;
+        if (btnMark != null) btnMark.Enabled = false;
         try { if (recv != null && !recv.HasExited) recv.Kill(); } catch { }
         recv = null;
         running = false;
@@ -945,6 +1071,7 @@ public class PhoneCamGui : Form
                 switch (kv[0]) {
                     case "mic": cbMic.Checked = kv[1] == "1"; break;
                     case "callfilter": cbRawMic.Checked = kv[1] == "1"; break;
+                    case "phonediag": cbPhoneDiag.Checked = kv[1] == "1"; break;
                     case "srtpass": pairSecret = kv[1]; break;   // migrate the secret from pre-0.5 settings
                     case "pairsecret": pairSecret = kv[1]; break;
                     case "autolisten": autoListen = kv[1] == "1"; break;
@@ -973,6 +1100,7 @@ public class PhoneCamGui : Form
             var lines = new List<string> {
                 "mic=" + (cbMic.Checked ? "1" : "0"),
                 "callfilter=" + (cbRawMic.Checked ? "1" : "0"),
+                "phonediag=" + (cbPhoneDiag.Checked ? "1" : "0"),
                 "pairsecret=" + pairSecret,
                 "boost=" + cbBoost.SelectedIndex,
                 "eqcustom=" + customEq,
