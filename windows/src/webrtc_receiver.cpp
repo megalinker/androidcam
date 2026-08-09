@@ -16,6 +16,9 @@
 #include "video_sink.h"   // Phase 5: H.264 -> softcam virtual camera
 #include "stats.h"        // flag-gated (PHONECAM_STATS) latency/queue instrumentation
 #include "pro_audio.h"    // MMCSS "Pro Audio" for the render thread (F-09)
+#include "phone_status.h" // phone battery/charging over the signaling socket ('B')
+#include "rtp_loss.h"     // RTP sequence-continuity monitor (incomplete-frame detection)
+#include "marker.h"       // "Mark video problem" correlation marker
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -43,6 +46,12 @@ extern "C" {
 #include <thread>
 
 using namespace std::chrono_literals;
+
+// Minimum spacing between keyframe (PLI) requests. Deliberately conservative: a keyframe costs the
+// phone several times a P-frame in encode work and bytes, so recovery must stay event-driven and
+// bounded rather than becoming a standing bitrate/battery tax. 1 s also matches the USB path's GOP,
+// i.e. the worst case here is no worse than what the cable path already does continuously.
+static constexpr uint64_t kPliMinIntervalUs = 1000000;
 
 // ---- PCAM3 TCP framing: [1 byte type]['S'|'O'|'A'][4-byte BE len][payload] ----
 static bool sendAll(SOCKET s, const char *buf, int len) {
@@ -77,6 +86,42 @@ static bool recvMsg(SOCKET s, char &type, std::string &payload) {
                  ((uint32_t)(uint8_t)hdr[3] << 8)  | (uint32_t)(uint8_t)hdr[4];
     payload.resize(n);
     return n == 0 || recvAll(s, &payload[0], (int)n);
+}
+
+// Blocking read that tolerates the socket's receive timeout, so the session loop stays responsive to
+// Ctrl-C / peer loss while still being able to receive the phone's status messages.
+//   1 = a message was read, 0 = nothing arrived before the timeout, -1 = the peer closed / errored.
+// Once the first byte of a message has been consumed we must not return mid-message (that would
+// desync the framing), so only the very first read is allowed to time out.
+static int recvMsgTimed(SOCKET s, char &type, std::string &payload) {
+    char hdr[5];
+    int n = recv(s, hdr, 1, 0);
+    if (n == 0) return -1;
+    if (n < 0) {
+        int e = WSAGetLastError();
+        return (e == WSAETIMEDOUT || e == WSAEWOULDBLOCK) ? 0 : -1;
+    }
+    // The rest of the message must be read to completion; retry across receive timeouts so a payload
+    // that happens to straddle one does not desync the framing.
+    auto recvRest = [](SOCKET sk, char *buf, int len) {
+        while (len > 0) {
+            int r = recv(sk, buf, len, 0);
+            if (r > 0) { buf += r; len -= r; continue; }
+            if (r == 0) return false;
+            int e = WSAGetLastError();
+            if (e == WSAETIMEDOUT || e == WSAEWOULDBLOCK) continue;
+            return false;
+        }
+        return true;
+    };
+    if (!recvRest(s, hdr + 1, 4)) return -1;
+    type = hdr[0];
+    uint32_t len = ((uint32_t)(uint8_t)hdr[1] << 24) | ((uint32_t)(uint8_t)hdr[2] << 16) |
+                   ((uint32_t)(uint8_t)hdr[3] << 8)  | (uint32_t)(uint8_t)hdr[4];
+    if (len > 10u * 1024 * 1024) return -1;   // desync guard
+    payload.resize(len);
+    if (len && !recvRest(s, &payload[0], (int)len)) return -1;
+    return 1;
 }
 
 // Offset of the RTP payload (past the 12-byte header + CSRCs + optional extension).
@@ -180,7 +225,12 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
     AVCodecContext *decCtxV = nullptr;
     VideoSink       videoSink(30.0, cfg.wantPreview);
     std::shared_ptr<rtc::Track> vtrack;
-    uint64_t        lastPliUs = 0;   // F-08: rate-limit keyframe requests on decode error
+    auto lossMon = std::make_shared<RtpLossMonitor>();   // raw-RTP sequence continuity (see rtp_loss.h)
+    uint64_t        lastPliUs = 0;   // rate-limit keyframe requests (decode error OR packet loss)
+    // Counters for the session-end line and for the "mark video problem" snapshot.
+    std::atomic<uint64_t> incompleteFrames{0};   // frames delivered after an RTP gap
+    std::atomic<uint64_t> decodeErrFrames{0};    // frames FFmpeg flagged as damaged/concealed
+    std::atomic<uint64_t> pliSent{0}, pliSuppressed{0};
     // libdatachannel dispatches track callbacks from a thread pool, so audio onMessage and video
     // onFrame (and successive frames of each) can run concurrently. The Opus and H.264 decoders use
     // independent AVCodecContexts and independent sinks, so they only need to be serialized against
@@ -188,6 +238,24 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
     // is being decoded+converted (each callback takes only its own lock, so no deadlock). See F-07.
     std::mutex audioDecodeMutex;
     std::mutex videoDecodeMutex;
+
+    // One place decides whether to ask the phone for a fresh IDR. Declared at SESSION scope (not
+    // inside the wantVideo block) because the onFrame callback captures it by reference and outlives
+    // any narrower scope — the track is only torn down at pc.reset() below.
+    //
+    // Rate-limited, because a keyframe is the single most expensive thing we can ask the phone's
+    // encoder for: unthrottled requests during a loss burst would raise bitrate, encoder load and
+    // therefore battery. At one per second the worst case is a keyframe cadence no tighter than the
+    // phone's own USB-path GOP, and in a clean session it never fires at all.
+    auto askKeyframe = [&](const char *why) {
+        if (!vtrack) return;
+        uint64_t now = stats::nowUs();
+        if (now - lastPliUs < kPliMinIntervalUs) { pliSuppressed.fetch_add(1); return; }
+        lastPliUs = now;
+        pliSent.fetch_add(1);
+        try { vtrack->requestKeyframe(); } catch (...) {}
+        fprintf(stderr, "[video] keyframe requested (%s)\n", why);
+    };
 
     pc->onStateChange([&disconnected, &vtrack](rtc::PeerConnection::State s) {
         using S = rtc::PeerConnection::State;
@@ -259,8 +327,16 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
         vtrack = pc->addTrack(vmedia);
         auto depack = std::make_shared<rtc::H264RtpDepacketizer>(rtc::NalUnit::Separator::StartSequence);
         depack->addToChain(std::make_shared<rtc::RtcpReceivingSession>());
+        // Added last => sees raw RTP FIRST on the incoming path (incomingChain unwinds from the tail).
+        depack->addToChain(lossMon);
         vtrack->setMediaHandler(depack);
+
         vtrack->onFrame([&, decCtxV](rtc::binary data, rtc::FrameInfo) {
+            // Did packets go missing since the previous frame? If so this frame was reassembled with a
+            // hole in it: libdatachannel's depacketizer emits partial frames without saying so, and no
+            // NACK is ever sent, so this is our only chance to notice. Read BEFORE decoding so the
+            // flag belongs to the frame we are about to submit.
+            const bool gapped = lossMon->consumeGap();
             std::lock_guard<std::mutex> lk(videoDecodeMutex);
             AVPacket *pk = av_packet_alloc();
             if (av_new_packet(pk, (int)data.size()) == 0) {
@@ -271,15 +347,21 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
                     while (avcodec_receive_frame(decCtxV, fr) == 0) {
                         if (stats::enabled() && fr->pts != AV_NOPTS_VALUE)
                             stats::g_decodeLat.add((double)((int64_t)stats::nowUs() - fr->pts));
-                        // Speed up recovery after packet loss: if the decoder output a frame with a
-                        // broken reference chain, ask the phone for a fresh IDR now instead of waiting a
-                        // whole GOP. Rate-limited to >=400ms so a loss burst can't cause a keyframe
-                        // storm (which would spike bitrate). (F-08)
-                        if ((fr->decode_error_flags &
-                             (FF_DECODE_ERROR_INVALID_BITSTREAM | FF_DECODE_ERROR_MISSING_REFERENCE)) && vtrack) {
-                            uint64_t now = stats::nowUs();
-                            if (now - lastPliUs > 400000) { lastPliUs = now; try { vtrack->requestKeyframe(); } catch (...) {} }
-                        }
+                        // Two independent corruption signals, because neither alone is sufficient:
+                        //  - the transport signal (an RTP gap) is exact but only covers losses we saw;
+                        //  - FFmpeg's decode_error_flags catch damage the transport can't see. The
+                        //    original code checked only INVALID_BITSTREAM|MISSING_REFERENCE, which a
+                        //    truncated-but-parseable frame does NOT set — the concealment path sets
+                        //    CONCEALMENT_ACTIVE/DECODE_SLICES instead, so those cases silently produced
+                        //    the persistent corrupt region with no recovery request at all.
+                        const int kDamaged = FF_DECODE_ERROR_INVALID_BITSTREAM |
+                                             FF_DECODE_ERROR_MISSING_REFERENCE |
+                                             FF_DECODE_ERROR_CONCEALMENT_ACTIVE |
+                                             FF_DECODE_ERROR_DECODE_SLICES;
+                        const bool damaged = (fr->decode_error_flags & kDamaged) != 0;
+                        if (damaged) decodeErrFrames.fetch_add(1);
+                        if (gapped) incompleteFrames.fetch_add(1);
+                        if (damaged || gapped) askKeyframe(gapped ? "rtp-gap" : "decode-error");
                         videoSink.WriteFrame(fr); av_frame_unref(fr);
                     }
                     av_frame_free(&fr);
@@ -303,10 +385,55 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
         fprintf(stderr, "[webrtc] no answer — aborting session\n");
     }
 
+    // Tell the phone what this receiver understands. Sent AFTER the answer on purpose: a phone that
+    // predates the feature is by then in its "read until EOF" loop and harmlessly discards these
+    // bytes, whereas a hello sent before the offer would break its `expected offer 'O'` check.
+    if (negotiated) sendMsg(cli, 'V', phonestatus::helloJson());
+
     // Media flows on the rtc thread -> queue -> audio thread. Hold here until the peer drops — but ONLY
     // if we actually negotiated. A valid-secret-but-no-answer peer must not hold this single-threaded
     // server in the spin loop (it would block every later phone); fall straight through to cleanup. (F-01)
-    while (negotiated && *running && !disconnected) std::this_thread::sleep_for(100ms);
+    //
+    // While holding, this thread also serves the signaling socket as a control channel: it receives
+    // the phone's periodic device status ('B') and forwards "mark video problem" ('M'). A short
+    // receive timeout keeps it as responsive to Ctrl-C as the old 100 ms sleep loop was.
+    {
+        DWORD ctrlTimeoutMs = 300;
+        setsockopt(cli, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ctrlTimeoutMs, sizeof(ctrlTimeoutMs));
+    }
+    marker::Consumer marks;
+    uint64_t statusMsgs = 0, unknownMsgs = 0;
+    while (negotiated && *running && !disconnected) {
+        std::string note;
+        if (marks.poll(note)) {
+            // Snapshot the numbers that explain a visual artifact, at the instant it was seen.
+            fprintf(stderr,
+                    "[mark] note=\"%s\" rtp_recv=%llu rtp_lost=%llu (%.3f%%) gaps=%llu reorder=%llu dup=%llu "
+                    "incompleteFrames=%llu decodeErrFrames=%llu pli=%llu pliSuppressed=%llu vframes=%ld\n",
+                    note.c_str(),
+                    (unsigned long long)lossMon->received(), (unsigned long long)lossMon->lost(),
+                    lossMon->lossPercent(), (unsigned long long)lossMon->gaps(),
+                    (unsigned long long)lossMon->reordered(), (unsigned long long)lossMon->duplicates(),
+                    (unsigned long long)incompleteFrames.load(), (unsigned long long)decodeErrFrames.load(),
+                    (unsigned long long)pliSent.load(), (unsigned long long)pliSuppressed.load(),
+                    videoSink.frames());
+            fflush(stderr);
+            sendMsg(cli, 'M', note);   // let the phone stamp its own log at the same moment
+        }
+
+        char t; std::string payload;
+        int r = recvMsgTimed(cli, t, payload);
+        if (r < 0) { fprintf(stderr, "[webrtc] signaling closed by peer\n"); break; }
+        if (r == 0) continue;
+        if (t == 'B') {
+            PhoneStatusMsg st = phonestatus::parse(payload);
+            if (st.valid) { ++statusMsgs; phonestatus::emit(st); }
+        } else if (++unknownMsgs <= 5) {
+            // A newer phone may send message types we don't know; ignoring them is the compatibility
+            // contract. Log only the first few so a chatty peer can never flood the desktop app's log.
+            fprintf(stderr, "[webrtc] ignoring control message '%c' (%zu bytes)\n", t, payload.size());
+        }
+    }
 
     pc->close();
     pc.reset();                                         // ensure no more onMessage before we free decCtx
@@ -316,8 +443,18 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
     if (decCtxV) avcodec_free_context(&decCtxV);
     avcodec_free_context(&decCtx);
     avcodec_free_context(&sinkFmt);
-    fprintf(stderr, "[webrtc] session ended (rtp=%d, vframes=%ld) — listening again\n",
-            rtpCount.load(), videoSink.frames());
+    // One line per session with everything needed to judge link quality after the fact. Always on:
+    // it is a single printf at teardown, not instrumentation.
+    fprintf(stderr,
+            "[webrtc] session ended (rtp=%d, vframes=%ld, status=%llu) video: recv=%llu lost=%llu (%.3f%%) "
+            "gaps=%llu reorder=%llu dup=%llu incompleteFrames=%llu decodeErrFrames=%llu pli=%llu "
+            "pliSuppressed=%llu — listening again\n",
+            rtpCount.load(), videoSink.frames(), (unsigned long long)statusMsgs,
+            (unsigned long long)lossMon->received(), (unsigned long long)lossMon->lost(),
+            lossMon->lossPercent(), (unsigned long long)lossMon->gaps(),
+            (unsigned long long)lossMon->reordered(), (unsigned long long)lossMon->duplicates(),
+            (unsigned long long)incompleteFrames.load(), (unsigned long long)decodeErrFrames.load(),
+            (unsigned long long)pliSent.load(), (unsigned long long)pliSuppressed.load());
 }
 
 int run_webrtc_session(const WebrtcRecvConfig &cfg, std::atomic<bool> *running) {

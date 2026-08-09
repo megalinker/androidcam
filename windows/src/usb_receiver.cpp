@@ -28,6 +28,8 @@ extern "C" {
 #include "wasapi_sink.h"
 #include "stats.h"
 #include "pro_audio.h"
+#include "phone_status.h"
+#include "marker.h"
 
 namespace {
 
@@ -69,13 +71,15 @@ struct VideoQueue {
     bool done = false;
     static constexpr size_t kMax = 120;   // ~4s @30fps — bound memory; a real backlog means decode can't keep up
 
+    std::atomic<uint64_t> dropped{0};   // always counted (stats::g_videoQ is flag-gated)
+
     void push(const uint8_t *p, int n) {
         std::lock_guard<std::mutex> lk(m);
         // Overflow: shed the NEWEST unit (drop this one) rather than the oldest. Dropping the oldest
         // breaks the decoder's reference chain -> macroblock corruption until the next IDR (~1s on the
         // phone's 1s GOP); dropping the newest keeps the buffered GOP (incl. its IDR) contiguous so
         // decode stays clean and only the most-recent frames are lost. Still bounded. See docs/perf-audit F-02.
-        if (q.size() >= kMax) { stats::g_videoQ.drop(); return; }
+        if (q.size() >= kMax) { stats::g_videoQ.drop(); dropped.fetch_add(1); return; }
         q.emplace_back(p, p + n);
         stats::g_videoQ.observe((long)q.size());
         cv.notify_one();
@@ -95,7 +99,7 @@ struct VideoQueue {
     }
 };
 
-void videoThread(VideoQueue *vq, VideoSink *sink) {
+void videoThread(VideoQueue *vq, VideoSink *sink, std::atomic<uint64_t> *damagedFrames) {
     const AVCodec *decv = avcodec_find_decoder(AV_CODEC_ID_H264);
     AVCodecContext *ctx = avcodec_alloc_context3(decv);
     ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
@@ -121,6 +125,13 @@ void videoThread(VideoQueue *vq, VideoSink *sink) {
                 while (avcodec_receive_frame(ctx, fr) == 0) {
                     if (stats::enabled() && fr->pts != AV_NOPTS_VALUE)
                         stats::g_decodeLat.add((double)((int64_t)stats::nowUs() - fr->pts));
+                    // TCP cannot lose or reorder bytes, so a damaged frame here means the loss happened
+                    // above the transport — our own queue overflow, or a framing/lifetime bug. Counting
+                    // it is what separates "the cable path is clean" from "we corrupt it ourselves".
+                    if (fr->decode_error_flags &
+                        (FF_DECODE_ERROR_INVALID_BITSTREAM | FF_DECODE_ERROR_MISSING_REFERENCE |
+                         FF_DECODE_ERROR_CONCEALMENT_ACTIVE | FF_DECODE_ERROR_DECODE_SLICES))
+                        damagedFrames->fetch_add(1);
                     sink->WriteFrame(fr);
                     av_frame_unref(fr);
                     if ((++vframes % 150) == 0) fprintf(stderr, "[usb] %ld video frames\n", vframes);
@@ -216,15 +227,38 @@ SOCKET connectLoop(int port, std::atomic<bool> *running) {
     return INVALID_SOCKET;
 }
 
+// PC -> phone control frame: [1B type][4B BE len][payload]. Only this thread writes to the socket.
+bool sendControl(SOCKET s, char type, const std::string &payload) {
+    char hdr[5];
+    uint32_t n = (uint32_t)payload.size();
+    hdr[0] = type;
+    hdr[1] = (char)((n >> 24) & 0xff); hdr[2] = (char)((n >> 16) & 0xff);
+    hdr[3] = (char)((n >> 8) & 0xff);  hdr[4] = (char)(n & 0xff);
+    const char *buf = hdr; int len = 5;
+    for (int pass = 0; pass < 2; ++pass) {
+        while (len > 0) {
+            int w = send(s, buf, len, 0);
+            if (w <= 0) return false;
+            buf += w; len -= w;
+        }
+        if (pass == 0) { buf = payload.data(); len = (int)n; if (len == 0) break; }
+    }
+    return true;
+}
+
 // One connected session: read frames until EOF/stop. The receive thread does I/O only and hands
 // video off to a decode thread and audio to a render thread, so neither can starve the socket reads.
 void session(SOCKET s, const UsbRecvConfig &cfg, std::atomic<bool> *running) {
     VideoSink videoSink(30.0, cfg.wantPreview);
     VideoQueue vq;
     PcmQueue pq;
-    std::thread vt(videoThread, &vq, &videoSink);
+    std::atomic<uint64_t> damagedFrames{0};
+    std::thread vt(videoThread, &vq, &videoSink, &damagedFrames);
     std::thread at;
     bool audioStarted = false;
+    marker::Consumer marks;
+    uint64_t statusMsgs = 0, lastSeenDrops = 0, keyframeAsks = 0;
+    auto lastAskMs = std::chrono::steady_clock::now() - std::chrono::seconds(10);
 
     uint8_t hdr[13];
     std::vector<uint8_t> payload;
@@ -250,6 +284,35 @@ void session(SOCKET s, const UsbRecvConfig &cfg, std::atomic<bool> *running) {
             vq.push(payload.data(), len);
         } else if (type == 'A') {
             pq.push(payload.data(), len);
+        } else if (type == phonestatus::kUsbStatusType) {
+            PhoneStatusMsg st = phonestatus::parse(std::string((char *)payload.data(), payload.size()));
+            if (st.valid) { ++statusMsgs; phonestatus::emit(st); }
+        }
+
+        // --- outbound control, driven off the same thread so the socket has a single writer ---
+        std::string note;
+        if (marks.poll(note)) {
+            fprintf(stderr, "[mark] note=\"%s\" transport=usb vframes=%ld queueDrops=%llu "
+                            "damagedFrames=%llu keyframeAsks=%llu\n",
+                    note.c_str(), videoSink.frames(), (unsigned long long)vq.dropped.load(),
+                    (unsigned long long)damagedFrames.load(), (unsigned long long)keyframeAsks);
+            fflush(stderr);
+            sendControl(s, 'M', note);
+        }
+        // A queue overflow drops encoded units, which breaks the decoder's reference chain until the
+        // phone's next IDR. TCP gives us no loss, so this is the one place the cable path can corrupt
+        // itself — ask for a keyframe instead of waiting out the GOP. Rate-limited to 1/s so a sustained
+        // overload cannot turn into a keyframe storm.
+        uint64_t drops = vq.dropped.load();
+        if (drops != lastSeenDrops) {
+            lastSeenDrops = drops;
+            auto now = std::chrono::steady_clock::now();
+            if (now - lastAskMs >= std::chrono::seconds(1)) {
+                lastAskMs = now;
+                ++keyframeAsks;
+                sendControl(s, 'K', "");
+                fprintf(stderr, "[usb] video queue overflow — requested a keyframe\n");
+            }
         }
     }
 
@@ -258,6 +321,10 @@ void session(SOCKET s, const UsbRecvConfig &cfg, std::atomic<bool> *running) {
     pq.finish();
     if (at.joinable()) at.join();
     videoSink.Stop();
+    fprintf(stderr, "[usb] session ended (vframes=%ld, status=%llu) queueDrops=%llu damagedFrames=%llu "
+                    "keyframeAsks=%llu\n",
+            videoSink.frames(), (unsigned long long)statusMsgs, (unsigned long long)vq.dropped.load(),
+            (unsigned long long)damagedFrames.load(), (unsigned long long)keyframeAsks);
 }
 
 }  // namespace

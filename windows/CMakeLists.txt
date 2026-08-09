@@ -95,6 +95,17 @@ if(WITH_WEBRTC_TESTS)
 endif()
 
 # ---------------------------------------------------------------------------
+# phonecam_tests — unit tests for the receiver's dependency-free logic (phone-status wire
+# format, RTP sequence tracking, the problem marker). Links nothing, so it builds and runs in
+# seconds even without FFmpeg/libdatachannel present. Built by default; run it after any change
+# to phone_status.h / rtp_seq.h / marker.h:
+#   cmake --build build-webrtc --config Release --target phonecam_tests
+#   build-webrtc\Release\phonecam_tests.exe
+# ---------------------------------------------------------------------------
+add_executable(phonecam_tests src/phonecam_tests.cpp)
+add_custom_target(run_tests COMMAND phonecam_tests DEPENDS phonecam_tests)
+
+# ---------------------------------------------------------------------------
 # latbench — end-to-end acoustic latency benchmark (WASAPI only, no webrtc dep).
 # ---------------------------------------------------------------------------
 option(WITH_LATBENCH "Build the latbench latency benchmark tool" OFF)

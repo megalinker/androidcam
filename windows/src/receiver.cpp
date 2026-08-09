@@ -28,6 +28,7 @@
 #include "usb_receiver.h"      // scrcpy-style H.264/PCM over an adb-forwarded socket -> WASAPI + softcam
 #include "video_sink.h"        // VideoSetRotate/FlipH/FlipV — manual, live output transform
 #include "stats.h"             // flag-gated (PHONECAM_STATS) latency/queue instrumentation
+#include "marker.h"            // "Mark video problem" — operator-raised correlation marker
 
 static std::atomic<bool> g_running{true};
 static void on_sigint(int) { g_running = false; }
@@ -49,7 +50,8 @@ struct Options {
 };
 
 // Live flip/rotate control: the GUI writes one command per line to our stdin as the user clicks the
-// Flip/Rotate buttons. Never automatic. Commands: "fliph 0|1", "flipv 0|1", "rotate 0|90|180|270".
+// Flip/Rotate buttons. Never automatic. Commands: "fliph 0|1", "flipv 0|1", "rotate 0|90|180|270",
+// "preview 0|1", and "mark <note>" (the operator saw a visual artifact right now).
 static void stdin_control_thread() {
     std::string line;
     while (std::getline(std::cin, line)) {
@@ -59,6 +61,12 @@ static void stdin_control_thread() {
         else if (cmd == "flipv") { int v = 0; ss >> v; VideoSetFlipV(v != 0); }
         else if (cmd == "rotate") { int v = 0; ss >> v; VideoSetRotate(v); }
         else if (cmd == "preview") { int v = 1; ss >> v; VideoSetPreviewVisible(v != 0); }   // F-34: hidden => skip idle video work
+        else if (cmd == "mark") {
+            std::string note;
+            std::getline(ss, note);
+            if (!note.empty() && note[0] == ' ') note.erase(0, 1);
+            marker::raise(note.empty() ? "video artifact" : note);
+        }
     }
 }
 
