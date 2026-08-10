@@ -405,6 +405,14 @@ class WebRtcSender(
                             sb.append("bytes=").append(m["bytesSent"])
                             sb.append(" pkts=").append(m["packetsSent"])
                             if (kind == "video") {
+                                // Mirror the stack's cumulative encode counters into our own, so the
+                                // sample line's encFps/encKbps are real on this path too. libwebrtc
+                                // owns the encoder here (unlike the USB path, where we drive
+                                // MediaCodec ourselves and count in its callback), so without this
+                                // they sat at zero and read as "the encoder is doing nothing".
+                                (m["framesEncoded"] as? Number)?.let { Diag.c.framesEncoded.set(it.toLong()) }
+                                (m["keyFramesEncoded"] as? Number)?.let { Diag.c.keyFrames.set(it.toLong()) }
+                                (m["bytesSent"] as? Number)?.let { Diag.c.encodedBytes.set(it.toLong()) }
                                 sb.append(" frames=").append(m["framesEncoded"])
                                 sb.append(" key=").append(m["keyFramesEncoded"])
                                 sb.append(" fps=").append(m["framesPerSecond"])
