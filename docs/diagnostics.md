@@ -164,6 +164,51 @@ Then aggregate:
 
 ---
 
+## 4b. Decomposing the CPU cost (the mode sweep)
+
+The first on-hardware session (Pixel 9 Pro XL, 2.8 h, 720p24 over Wi-Fi) measured **656 mA / ~2.5 W**
+and, more interestingly, **~54 % of one CPU core sustained**. That is far more CPU than a
+Surface→hardware-encoder pipeline should need — the encoder was confirmed hardware
+(`enc=c2.exynos.h264.encoder`) — so something is doing per-frame or per-packet work that isn't
+obviously necessary.
+
+Two candidates, both confirmed present in the code but **not** yet confirmed as the cost:
+
+* **Software audio processing.** `createAudioSource(MediaConstraints())` leaves libwebrtc's APM
+  (AEC3, noise suppression, AGC, high-pass) enabled. The "raw mic" option disables the *hardware*
+  AEC/NS on the audio device module but not this. A phone used as a standalone remote mic has no
+  local playback to echo-cancel.
+* **Pixel rotation before encode.** The camera delivered 1280×720 but the encoder emitted 720×1280,
+  so the rotation is baked into the frames. libdatachannel never offers the
+  `urn:3gpp:video-orientation` (CVO) extension, so the rotation cannot be signalled in RTP and has to
+  be applied to pixels — which can force a texture→I420 conversion per frame.
+
+**The experiment that tells them apart — no code changes, ~20 minutes.** Run three sessions and
+compare `cpu=` and `currentUA` in the sample lines:
+
+| Run | Phone mode | Isolates |
+|---|---|---|
+| 1 | Cam + Mic | the baseline (~54 %) |
+| 2 | Camera only | video pipeline alone |
+| 3 | Mic only | audio pipeline alone |
+
+Five minutes each is plenty — the numbers are steady within a couple of samples. Keep the scene,
+lighting and room temperature identical, stay on Wi-Fi, and stay unplugged.
+
+Reading it:
+
+* **Mic-only lands at 20–30 %** → the APM is the cost. The fix is to pass explicit constraints
+  turning AEC/NS/AGC off, gated behind the existing raw-mic flag so the default sound is unchanged.
+* **Camera-only carries most of it** → the rotation is the cost. The fix is to stop rotating on the
+  phone and use the receiver's existing rotate control instead (PC-side rotation is nearly free —
+  `video_sink.cpp` already does it).
+* **Both are substantial** → they are additive and both fixes apply.
+
+Either fix must then be re-measured the same way before it is kept: the point is a lower `currentUA`
+at the same `capFps`/`encKbps`, not a lower CPU number on its own.
+
+---
+
 ## 5. Platform profilers (independent of our telemetry)
 
 Our own numbers say what the app thinks it is doing. These say what the device measured.

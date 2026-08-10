@@ -105,7 +105,7 @@ public class PhoneCamGui : Form
     readonly object logLock = new object();
     readonly List<string> logLines = new List<string>();
     string receiverExe, settingsPath, logPath;
-    const string Version = "0.6.1";
+    const string Version = "0.6.2";
     const int WebrtcSigPort = 8891;   // TCP port the PC's WebRTC PCAM3 signaling listener binds
     const int UsbPort = 27183;        // loopback port we adb-forward to the phone's USB stream socket
     string adbExe;                    // bundled/system adb, or null — drives the USB path
