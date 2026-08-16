@@ -312,6 +312,9 @@ class WebRtcSender(
         capturer.initialize(helper, appCtx, obs)
         Diag.event("camera_prepared", "transport=webrtc", "cam=$camName",
             "reqW=$videoW", "reqH=$videoH", "reqFps=$videoFps")
+        // D-04: libwebrtc owns the capture request on this path, so these characteristics are the
+        // only window we have into what the camera was actually asked to do.
+        Diag.logCameraCapabilities(appCtx, camName)
         val vtrack = factory!!.createVideoTrack("cam0", vsrc).apply { setEnabled(true) }
         videoTrack = vtrack
         val sender = peer.addTrack(vtrack, listOf("pcam"))
@@ -411,7 +414,7 @@ class WebRtcSender(
                 lastW = frame.buffer.width; lastH = frame.buffer.height
             }
             if (!stripRotation || frame.rotation == 0) {
-                delegate.onFrameCaptured(frame)
+                Diag.trace("pcam.capture") { delegate.onFrameCaptured(frame) }   // D-02
                 return
             }
             // Re-wrap the SAME buffer with rotation 0. VideoFrame's constructor does not take a
@@ -419,7 +422,8 @@ class WebRtcSender(
             // untouched and the buffer cannot be freed under the consumer.
             frame.buffer.retain()
             val unrotated = org.webrtc.VideoFrame(frame.buffer, 0, frame.timestampNs)
-            try { delegate.onFrameCaptured(unrotated) } finally { unrotated.release() }
+            try { Diag.trace("pcam.capture") { delegate.onFrameCaptured(unrotated) } }   // D-02
+            finally { unrotated.release() }
         }
     }
 

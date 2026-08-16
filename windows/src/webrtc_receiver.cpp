@@ -53,6 +53,53 @@ using namespace std::chrono_literals;
 // i.e. the worst case here is no worse than what the cable path already does continuously.
 static constexpr uint64_t kPliMinIntervalUs = 1000000;
 
+// ---- Codec parameters we offer, instead of libdatachannel's defaults ----
+//
+// N-01. libdatachannel's DEFAULT_OPUS_AUDIO_PROFILE is
+//   "minptime=10;maxaveragebitrate=96000;stereo=1;sprop-stereo=1;useinbandfec=1"
+// and the phone honours it exactly — a measured 96 kbps, in stereo, from a **mono** microphone. The
+// second channel carries no information the phone ever captured, so it is encoder work and radio
+// bytes spent on a duplicate. Ask for mono, and for a bitrate that is generous for one channel of
+// speech rather than three times what it needs. Nothing audible is lost: you cannot lose information
+// that was never in the source.
+static const char *kOpusProfile =
+    "minptime=10;maxaveragebitrate=64000;stereo=0;sprop-stereo=0;useinbandfec=1";
+
+// N-02. libdatachannel defaults to profile-level-id=42e01f — Constrained Baseline **Level 3.1**,
+// which allows at most 3600 macroblocks per frame. 1080p is 8160, so the desktop app's 1080p and 4K
+// quality presets cannot legally be encoded against the level we advertise, and the phone would burn
+// ISP power capturing pixels the encoder then throws away.
+//
+// This field describes what THIS RECEIVER CAN DECODE, and FFmpeg decodes anything, so advertising a
+// low level was only ever under-selling ourselves. Level 5.1 (level_idc 0x33) covers the whole
+// quality dropdown up to 4K. The profile_idc and constraint flags (42e0) are unchanged — that pairing
+// is what the libdatachannel↔libwebrtc handshake actually matches on, and it is left exactly as the
+// on-hardware validation found it — and level-asymmetry-allowed=1 means the phone may still encode at
+// whatever level its hardware supports.
+static const char *kH264Profile =
+    "profile-level-id=42e033;packetization-mode=1;level-asymmetry-allowed=1";
+
+// D-03. One line summarising what the two ends actually agreed on. Both findings above were only
+// visible by reading a dependency's source; a log line makes the next one visible from a session log.
+static void logNegotiated(const std::string &sdp) {
+    auto field = [&](const char *key) -> std::string {
+        size_t i = sdp.find(key);
+        if (i == std::string::npos) return "-";
+        i += std::strlen(key);
+        size_t e = sdp.find_first_of(";\r\n ", i);
+        return sdp.substr(i, (e == std::string::npos ? sdp.size() : e) - i);
+    };
+    fprintf(stderr,
+            "[negotiated] h264.profile-level-id=%s packetization-mode=%s opus.stereo=%s "
+            "opus.maxaveragebitrate=%s opus.useinbandfec=%s video=%s audio=%s\n",
+            field("profile-level-id=").c_str(), field("packetization-mode=").c_str(),
+            field("stereo=").c_str(), field("maxaveragebitrate=").c_str(),
+            field("useinbandfec=").c_str(),
+            sdp.find("m=video") != std::string::npos ? "yes" : "no",
+            sdp.find("m=audio") != std::string::npos ? "yes" : "no");
+    fflush(stderr);
+}
+
 // ---- PCAM3 TCP framing: [1 byte type]['S'|'O'|'A'][4-byte BE len][payload] ----
 static bool sendAll(SOCKET s, const char *buf, int len) {
     while (len > 0) {
@@ -280,7 +327,7 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
     });
 
     rtc::Description::Audio media("audio", rtc::Description::Direction::RecvOnly);
-    media.addOpusCodec(111);
+    media.addOpusCodec(111, kOpusProfile);   // mono, 64 kbps — see kOpusProfile (N-01)
     media.addSSRC(42, "audio");
     auto track = pc->addTrack(media);
     track->setMediaHandler(std::make_shared<rtc::RtcpReceivingSession>());
@@ -322,7 +369,7 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
         // hypothesis was disproven by measurement, so no thread config is set here. See docs/perf-audit F-05.
         avcodec_open2(decCtxV, decv, nullptr);
         rtc::Description::Video vmedia("video", rtc::Description::Direction::RecvOnly);
-        vmedia.addH264Codec(96);
+        vmedia.addH264Codec(96, kH264Profile);   // level 5.1 so 1080p/4K are legal (N-02)
         vmedia.addSSRC(43, "video");
         vtrack = pc->addTrack(vmedia);
         auto depack = std::make_shared<rtc::H264RtpDepacketizer>(rtc::NalUnit::Separator::StartSequence);
@@ -380,6 +427,7 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
     if (recvMsg(cli, type, payload) && type == 'A') {
         fprintf(stderr, "[webrtc] got answer — connecting\n");
         pc->setRemoteDescription(rtc::Description(payload, "answer"));
+        logNegotiated(payload);   // D-03: record what the two ends actually agreed on
         negotiated = true;
     } else {
         fprintf(stderr, "[webrtc] no answer — aborting session\n");

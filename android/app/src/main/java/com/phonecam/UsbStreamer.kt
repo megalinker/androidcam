@@ -306,7 +306,9 @@ class UsbStreamer(
                         // 30–60/s heap allocation of tens to hundreds of KB (pure GC pressure).
                         if (outBuf.size < info.size) outBuf = ByteArray(info.size + (info.size shr 2))
                         buf.get(outBuf, 0, info.size)
-                        writeFrame('V', info.presentationTimeUs, outBuf, 0, info.size)   // Annex-B (incl. CODEC_CONFIG)
+                        Diag.trace("pcam.encodeOut") {   // D-02: shows up next to the codec track
+                            writeFrame('V', info.presentationTimeUs, outBuf, 0, info.size)   // Annex-B (incl. CODEC_CONFIG)
+                        }
                         if (Diag.on) {
                             Diag.c.encodedBytes.addAndGet(info.size.toLong())
                             if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
@@ -375,12 +377,12 @@ class UsbStreamer(
         val h = camHandler ?: return
         val mgr = appCtx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val camId = pickCamera(mgr, useBackCamera) ?: run { Log.e(TAG, "usb: no camera"); return }
+        Diag.logCameraCapabilities(appCtx, camId)   // D-04
         mgr.openCamera(camId, object : CameraDevice.StateCallback() {
             override fun onOpened(device: CameraDevice) {
                 camera = device
                 val surface = inputSurface ?: return
-                @Suppress("DEPRECATION")
-                device.createCaptureSession(listOf(surface), object : CameraCaptureSession.StateCallback() {
+                val sessionCb = object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
                         if (closed.get()) return
                         captureSession = session
@@ -418,7 +420,8 @@ class UsbStreamer(
                     override fun onConfigureFailed(session: CameraCaptureSession) {
                         Log.e(TAG, "usb: capture session config failed")
                     }
-                }, h)
+                }
+                openSession(device, surface, camId, sessionCb, h)
             }
             override fun onDisconnected(device: CameraDevice) { runCatching { device.close() }; camera = null }
             override fun onError(device: CameraDevice, error: Int) {
@@ -440,6 +443,58 @@ class UsbStreamer(
             Diag.event("camera_switched", "back=${if (useBackCamera) 1 else 0}")
         }
     }
+
+    /**
+     * Create the capture session, declaring a **stream use case** where the platform supports it.
+     *
+     * Android 13 (API 33) lets an app tell the camera HAL what a stream is *for*, and
+     * `STREAM_USE_CASE_VIDEO_CALL` is documented as "recommended for long-running camera uses where
+     * power drain is a concern" — which is exactly this app. On-hardware measurement put the camera
+     * and ISP at roughly 78 % of the total draw, so a hint the HAL can act on is the most promising
+     * lever available to us; unlike the encoder or the radio, we cannot otherwise reach it.
+     *
+     * Support is per device and must be queried: setting an unadvertised use case makes session
+     * configuration fail outright, so we only set one that `SCALER_AVAILABLE_STREAM_USE_CASES` lists,
+     * and fall back to the plain (pre-33) path everywhere else.
+     */
+    private fun openSession(
+        device: CameraDevice, surface: Surface, camId: String,
+        cb: CameraCaptureSession.StateCallback, h: Handler,
+    ) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            val useCase = supportedVideoCallUseCase(camId)
+            if (useCase != null) {
+                val ok = runCatching {
+                    val oc = android.hardware.camera2.params.OutputConfiguration(surface).apply {
+                        streamUseCase = useCase
+                    }
+                    device.createCaptureSession(
+                        android.hardware.camera2.params.SessionConfiguration(
+                            android.hardware.camera2.params.SessionConfiguration.SESSION_REGULAR,
+                            listOf(oc), java.util.concurrent.Executor { r -> h.post(r) }, cb))
+                    Diag.event("camera_stream_use_case", "value=VIDEO_CALL")
+                }.isSuccess
+                if (ok) return
+                Log.w(TAG, "usb: stream use case rejected — falling back")
+                Diag.event("camera_stream_use_case", "value=rejected")
+            } else {
+                Diag.event("camera_stream_use_case", "value=unsupported")
+            }
+        }
+        @Suppress("DEPRECATION")
+        device.createCaptureSession(listOf(surface), cb, h)
+    }
+
+    /** VIDEO_CALL if this camera advertises it, else null (setting an unadvertised one fails config). */
+    private fun supportedVideoCallUseCase(camId: String): Long? = runCatching {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) return null
+        val mgr = appCtx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val available = mgr.getCameraCharacteristics(camId)
+            .get(CameraCharacteristics.SCALER_AVAILABLE_STREAM_USE_CASES) ?: return null
+        // The characteristic is a long[]; the constant is an int. setStreamUseCase takes a long.
+        val want = CameraCharacteristics.SCALER_AVAILABLE_STREAM_USE_CASES_VIDEO_CALL.toLong()
+        if (available.any { it == want }) want else null
+    }.getOrNull()
 
     /**
      * The advertised AE target-fps range that best pins capture to [fps]. Prefers an exact

@@ -3,6 +3,8 @@ package com.phonecam
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Debug
@@ -185,6 +187,7 @@ object Diag {
         lastCpuTicks = -1L; lastTxBytes = -1L
         lastSampleElapsed = startElapsed
         lastCamFrames = 0; lastEncFrames = 0; lastEncBytes = 0
+        threadTicks.clear(); threadNames.clear()
         battStartPct = -1; battStartChargeUah = Long.MIN_VALUE
         thermalMax = -1; tempMaxDeciC = Int.MIN_VALUE; cpuTicksTotal = 0
         chargedDuringSession = false
@@ -207,6 +210,7 @@ object Diag {
             battStartChargeUah = b.chargeUah
             event("battery_state_changed", "phase=start", b.toKv())
             registerThermal()
+            logExitReasons(appCtx!!)   // D-05: why the previous process died, if it did
             sample()   // schedules itself
         }
     }
@@ -328,6 +332,7 @@ object Diag {
             lastCpuTicks = ticks
         } else sb.append(" cpu=n/a")
         sb.append(" threads=").append(readSelfThreads())
+        appendThreadCpu(sb, dtMs)   // D-01: where that CPU actually goes, by thread name
 
         // --- observed pipeline rates over this window (from the hot-path counters) ---
         val cam = c.cameraFrames.get(); val enc = c.framesEncoded.get(); val bytes = c.encodedBytes.get()
@@ -575,6 +580,137 @@ object Diag {
 
     private val clockTicksPerSec: Long by lazy {
         runCatching { Os.sysconf(OsConstants._SC_CLK_TCK) }.getOrDefault(100L).coerceAtLeast(1L)
+    }
+
+    // ---------------------------------------------------------------- camera capabilities (D-04)
+
+    /**
+     * Record the power-relevant capabilities of the camera actually in use.
+     *
+     * On the Wi-Fi path libwebrtc owns the capture request, so this is the only visibility we have
+     * into what the camera was asked to do. Electronic stabilization in particular is real ISP work
+     * that the USB path explicitly disables and the WebRTC path leaves at the device default — and
+     * until now there was no way to tell which default that was.
+     */
+    fun logCameraCapabilities(ctx: Context, camId: String) {
+        if (!on) return
+        runCatching {
+            val mgr = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val ch = mgr.getCameraCharacteristics(camId)
+            val stab = ch.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
+                ?.joinToString(",") ?: "n/a"
+            val fpsRanges = ch.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                ?.joinToString(",") { "${it.lower}-${it.upper}" } ?: "n/a"
+            val useCases =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                    ch.get(CameraCharacteristics.SCALER_AVAILABLE_STREAM_USE_CASES)?.joinToString(",") ?: "none"
+                else "pre-33"
+            event("camera_caps", "camId=$camId",
+                "sensorOrientation=${ch.get(CameraCharacteristics.SENSOR_ORIENTATION)}",
+                "facing=${ch.get(CameraCharacteristics.LENS_FACING)}",
+                "hwLevel=${ch.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)}",
+                "stabModes=$stab", "aeFpsRanges=$fpsRanges", "streamUseCases=$useCases")
+        }
+    }
+
+    // ---------------------------------------------------------------- system tracing (D-02)
+
+    /**
+     * Emit an ATrace slice, so our pipeline stages land on the **same Perfetto timeline** as the
+     * platform's camera, codec, CPU-frequency and power-rail tracks. Until now our telemetry was a
+     * separate 30 s text stream that could not be lined up against any of that.
+     *
+     * Only active at [Level.DEEP] *and* while a trace is actually being recorded, so the normal path
+     * pays one boolean check. Use `tools/power-trace.ps1`, which already includes `atrace_apps:
+     * com.phonecam`.
+     */
+    inline fun <T> trace(name: String, body: () -> T): T {
+        if (level != Level.DEEP) return body()
+        android.os.Trace.beginSection(name)
+        try { return body() } finally { android.os.Trace.endSection() }
+    }
+
+    // ---------------------------------------------------------------- per-thread CPU (D-01)
+
+    /**
+     * Per-thread CPU, from `/proc/self/task/<tid>/stat`. Reading our own threads needs no permission.
+     *
+     * This is the single most useful diagnostic in the file. Process CPU tells you *that* 54 % of a
+     * core is going somewhere; this tells you **where**, by thread name — and libwebrtc names its
+     * threads legibly (`Camera2Session`, `AudioRecordJavaThr`, `EncoderQueue`, `ModuleProcessThread`,
+     * `pacer`, `worker_thread`). Deciding whether the audio processing or the video path was the cost
+     * previously took four separate 5-minute runs on hardware; with this it is one line of one run.
+     *
+     * Cost: ~60 small reads once per 30 s sample, on the diagnostics thread. Only the top
+     * [TOP_THREADS] by CPU *delta* are reported, so the line stays short and the interesting threads
+     * are the ones that show up.
+     */
+    private const val TOP_THREADS = 6
+    private val threadTicks = HashMap<Int, Long>(96)
+    private val threadNames = HashMap<Int, String>(96)
+
+    private fun appendThreadCpu(sb: StringBuilder, dtMs: Long) {
+        val deltas = ArrayList<Pair<String, Long>>(64)
+        var totalDelta = 0L
+        runCatching {
+            val tasks = File("/proc/self/task").list() ?: return
+            val live = HashSet<Int>(tasks.size * 2)
+            for (t in tasks) {
+                val tid = t.toIntOrNull() ?: continue
+                live.add(tid)
+                val stat = runCatching { File("/proc/self/task/$tid/stat").readText() }.getOrNull() ?: continue
+                val close = stat.lastIndexOf(')')
+                if (close < 0 || close + 2 >= stat.length) continue
+                val name = threadNames.getOrPut(tid) {
+                    val open = stat.indexOf('(')
+                    if (open in 0 until close) stat.substring(open + 1, close) else "tid$tid"
+                }
+                val f = stat.substring(close + 2).split(' ')
+                if (f.size < 13) continue
+                val ticks = (f[11].toLongOrNull() ?: continue) + (f[12].toLongOrNull() ?: continue)
+                val prev = threadTicks.put(tid, ticks)
+                if (prev != null && ticks > prev) {
+                    val d = ticks - prev
+                    totalDelta += d
+                    deltas.add(name to d)
+                }
+            }
+            // Threads come and go (libwebrtc spins some up per session); don't leak their entries.
+            threadTicks.keys.retainAll(live)
+            threadNames.keys.retainAll(live)
+        }
+        if (deltas.isEmpty()) return
+        deltas.sortByDescending { it.second }
+        sb.append(" threadCpu=[")
+        for ((i, e) in deltas.take(TOP_THREADS).withIndex()) {
+            if (i > 0) sb.append(' ')
+            val pct = 100.0 * (e.second * 1000.0 / clockTicksPerSec) / dtMs
+            sb.append(e.first).append(':').append(fmt1(pct))
+        }
+        sb.append(']')
+        // How much of the process total the listed threads account for — so a long tail of small
+        // threads can't masquerade as "nothing else is running".
+        val shown = deltas.take(TOP_THREADS).sumOf { it.second }
+        if (totalDelta > 0) sb.append(" threadCpuShown=").append(fmt1(100.0 * shown / totalDelta)).append('%')
+    }
+
+    // ---------------------------------------------------------------- process exit history (D-05)
+
+    /**
+     * Why the previous run of this process ended — ANR, low-memory kill, crash, user stop. Answers
+     * "the stream just stopped and I don't know why" without needing a repro. One binder call at
+     * session start; API 30+.
+     */
+    private fun logExitReasons(ctx: Context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        runCatching {
+            val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager ?: return
+            for (i in am.getHistoricalProcessExitReasons(ctx.packageName, 0, 3)) {
+                event("previous_exit", "reason=${i.reason}", "status=${i.status}",
+                    "importance=${i.importance}", "ageMs=${System.currentTimeMillis() - i.timestamp}",
+                    "desc=" + (i.description ?: "-").take(60).replace(' ', '_'))
+            }
+        }
     }
 
     /** utime+stime for THIS process, in clock ticks. Reading our own /proc entry needs no permission. */

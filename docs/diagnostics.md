@@ -229,6 +229,24 @@ rotation is on the GPU, and there is nothing to win.
 While the switch is on the picture arrives sideways on the PC; use the receiver's Rotate control to
 watch it. It is a measurement control, which is why it lives under Diagnostics and is off by default.
 
+### Reading `threadCpu` — where the CPU actually goes
+
+Every sample now carries a per-thread CPU breakdown, top 6 by delta:
+
+```
+threadCpu=[Camera2Session:14.2 EncoderQueue:9.8 AudioRecordJavaThr:7.1 ModuleProcessThread:5.3
+           pacer:3.9 worker_thread:2.6] threadCpuShown=78.4%
+```
+
+libwebrtc names its threads legibly, so this reads directly: `AudioRecordJavaThr` and
+`ModuleProcessThread` are the audio path, `Camera2Session`/`EncoderQueue` the video path, `pacer` and
+`worker_thread` the transport. `threadCpuShown` is what fraction of the process total those six
+account for, so a long tail of small threads can't hide.
+
+Deciding whether the audio processing or the video path owned the CPU previously took four separate
+5-minute runs on hardware. This answers it from one line of one run — use it before designing any
+A/B.
+
 ### Rules that made the difference
 
 - Compare **`cpuPerFps`**, never raw `cpu=`.
