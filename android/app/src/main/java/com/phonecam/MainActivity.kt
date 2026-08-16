@@ -43,6 +43,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var diagSwitch: com.google.android.material.materialswitch.MaterialSwitch
     private lateinit var diagHint: TextView
     private lateinit var diagShareBtn: MaterialButton
+    private lateinit var noRotateSwitch: com.google.android.material.materialswitch.MaterialSwitch
+    private lateinit var noRotateHint: TextView
 
     private val prefs by lazy { getSharedPreferences("phonecam", MODE_PRIVATE) }
     private val ui = Handler(Looper.getMainLooper())
@@ -94,6 +96,14 @@ class MainActivity : AppCompatActivity() {
         diagSwitch = findViewById(R.id.diagSwitch)
         diagHint = findViewById(R.id.diagHint)
         diagShareBtn = findViewById(R.id.diagShareBtn)
+        noRotateSwitch = findViewById(R.id.noRotateSwitch)
+        noRotateHint = findViewById(R.id.noRotateHint)
+        noRotateSwitch.isChecked = prefs.getBoolean(StreamService.PREF_NO_ROTATE, false)
+        noRotateSwitch.setOnCheckedChangeListener { _, on ->
+            prefs.edit().putBoolean(StreamService.PREF_NO_ROTATE, on).apply()
+            if (StreamService.isRunning) Toast.makeText(this,
+                "Takes effect on the next stream — stop and reconnect to apply.", Toast.LENGTH_LONG).show()
+        }
         diagSwitch.isChecked = prefs.getBoolean(StreamService.PREF_DIAG, false)
         updateDiagUi()
         diagSwitch.setOnCheckedChangeListener { _, on ->
@@ -242,6 +252,9 @@ class MainActivity : AppCompatActivity() {
             "Off. Turn on only while measuring — it samples power, thermals and CPU every 30 s and " +
             "uses a little battery itself."
         diagShareBtn.visibility = if (on) View.VISIBLE else View.GONE
+        // The rotation A/B is a measurement control, so it only appears alongside the other ones.
+        noRotateSwitch.visibility = if (on) View.VISIBLE else View.GONE
+        noRotateHint.visibility = if (on) View.VISIBLE else View.GONE
     }
 
     /** Hand the last session's events to any share target (mail, notes, chat) as plain text. */

@@ -207,6 +207,29 @@
                 android:textSize="12sp"
                 android:lineSpacingExtra="2dp" />
 
+            <!-- Measurement control: strips the pre-encode image rotation so its cost can be A/B'd
+                 with the phone left untouched. The picture arrives sideways on the PC while on. -->
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/noRotateSwitch"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:visibility="gone"
+                android:text="Measure: skip image rotation"
+                android:textColor="@color/pc_text"
+                android:textSize="15sp" />
+
+            <TextView
+                android:id="@+id/noRotateHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:visibility="gone"
+                android:text="For A/B testing only. The picture will arrive sideways on the PC — use its Rotate control to view it. Takes effect on the next stream."
+                android:textColor="@color/pc_muted"
+                android:textSize="12sp"
+                android:lineSpacingExtra="2dp" />
+
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/diagShareBtn"
                 style="@style/Widget.Material3.Button.TextButton"

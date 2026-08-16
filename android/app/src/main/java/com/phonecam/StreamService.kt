@@ -55,6 +55,10 @@ class StreamService : Service() {
         const val EXTRA_DEEP_DIAG = "deepDiag"
         /** SharedPreferences key backing the in-app "Record diagnostics" switch. */
         const val PREF_DIAG = "diagEnabled"
+        // Measurement only: send video with rotation 0 so the phone does not rotate pixels before
+        // encoding. Lets the rotation cost be A/B'd with the phone untouched. See WebRtcSender.
+        const val EXTRA_NO_ROTATE = "noRotate"
+        const val PREF_NO_ROTATE = "noRotateEnabled"
         // Transport: "webrtc" (default, Wi-Fi) or "usb" (scrcpy-style H.264/PCM over an adb-forwarded socket).
         const val EXTRA_TRANSPORT = "transport"
         // WebRTC signaling target (from the PC's PCAM3 QR).
@@ -217,6 +221,9 @@ class StreamService : Service() {
             ?: DEFAULT_QUALITY
         val transport = intent?.getStringExtra(EXTRA_TRANSPORT) ?: "webrtc"
         val rawMic = intent?.getBooleanExtra(EXTRA_RAW_MIC, true) ?: true   // default = raw/fuller mic (better sounding)
+        val prefs = getSharedPreferences("phonecam", MODE_PRIVATE)
+        val noRotate = intent?.getBooleanExtra(EXTRA_NO_ROTATE, prefs.getBoolean(PREF_NO_ROTATE, false))
+            ?: prefs.getBoolean(PREF_NO_ROTATE, false)
 
         startForegroundForMode(mode)
         if (!isRunning) {
@@ -225,12 +232,12 @@ class StreamService : Service() {
         }
         if (transport == "usb") {
             val usbPort = intent?.getIntExtra(EXTRA_USB_PORT, DEFAULT_USB_PORT) ?: DEFAULT_USB_PORT
-            startUsbStreaming(mode, quality, usbPort, rawMic)
+            startUsbStreaming(mode, quality, usbPort, rawMic)   // rotation strip is WebRTC-only
         } else {
             val sigHost = intent?.getStringExtra(EXTRA_SIG_HOST)
             val sigPort = intent?.getIntExtra(EXTRA_SIG_PORT, 0) ?: 0
             val sigSecret = intent?.getStringExtra(EXTRA_SIG_SECRET)
-            startStreaming(mode, quality, sigHost, sigPort, sigSecret, rawMic)
+            startStreaming(mode, quality, sigHost, sigPort, sigSecret, rawMic, noRotate)
         }
         return START_STICKY
     }
@@ -281,7 +288,8 @@ class StreamService : Service() {
      * (the PC pressed Stop) surfaces as DISCONNECTED and stops us at once.
      */
     private fun startStreaming(mode: Mode, quality: Quality,
-                               sigHost: String?, sigPort: Int, sigSecret: String?, rawMic: Boolean) {
+                               sigHost: String?, sigPort: Int, sigSecret: String?, rawMic: Boolean,
+                               noRotate: Boolean = false) {
         if (isRunning) return
         clientConnected = false; everConnected = false
 
@@ -291,7 +299,8 @@ class StreamService : Service() {
         }
         try {
             val sender = WebRtcSender(applicationContext, sigHost, sigPort, sigSecret,
-                mode != Mode.MIC_ONLY, mode != Mode.CAMERA_ONLY, quality.w, quality.h, quality.fps, rawMic) { state ->
+                mode != Mode.MIC_ONLY, mode != Mode.CAMERA_ONLY, quality.w, quality.h, quality.fps, rawMic,
+                noRotate) { state ->
                 when (state) {
                     WebRtcSender.State.CONNECTED -> {
                         clientConnected = true; everConnected = true

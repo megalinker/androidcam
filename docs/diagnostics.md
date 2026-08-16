@@ -164,50 +164,77 @@ Then aggregate:
 
 ---
 
-## 4b. Decomposing the CPU cost (the mode sweep)
+## 4b. What the first measurements found, and how to repeat them
 
-The first on-hardware session (Pixel 9 Pro XL, 2.8 h, 720p24 over Wi-Fi) measured **656 mA / ~2.5 W**
-and, more interestingly, **~54 % of one CPU core sustained**. That is far more CPU than a
-Surface→hardware-encoder pipeline should need — the encoder was confirmed hardware
-(`enc=c2.exynos.h264.encoder`) — so something is doing per-frame or per-packet work that isn't
-obviously necessary.
+Measured on a **Pixel 9 Pro XL, 720p30 over Wi-Fi, unplugged**, three 5-minute runs. Current is from
+the charge counter over settled windows, not the noisy `CURRENT_NOW`:
 
-Two candidates, both confirmed present in the code but **not** yet confirmed as the cost:
+| Mode | Current | CPU | Media |
+|---|---|---|---|
+| Cam + Mic | **683 mA** | 56.3 % | 2.30 Mbps video + 96 kbps audio |
+| Camera only | **648 mA** | 43.6 % | 2.15 Mbps video |
+| Mic only | **150 mA** | 19.8 % | 96 kbps audio |
 
-* **Software audio processing.** `createAudioSource(MediaConstraints())` leaves libwebrtc's APM
-  (AEC3, noise suppression, AGC, high-pass) enabled. The "raw mic" option disables the *hardware*
-  AEC/NS on the audio device module but not this. A phone used as a standalone remote mic has no
-  local playback to echo-cancel.
-* **Pixel rotation before encode.** The camera delivered 1280×720 but the encoder emitted 720×1280,
-  so the rotation is baked into the frames. libdatachannel never offers the
-  `urn:3gpp:video-orientation` (CVO) extension, so the rotation cannot be signalled in RTP and has to
-  be applied to pixels — which can force a texture→I420 conversion per frame.
+Solving those three gives the decomposition:
 
-**The experiment that tells them apart — no code changes, ~20 minutes.** Run three sessions and
-compare `cpu=` and `currentUA` in the sample lines:
-
-| Run | Phone mode | Isolates |
+| Component | Power | CPU |
 |---|---|---|
-| 1 | Cam + Mic | the baseline (~54 %) |
-| 2 | Camera only | video pipeline alone |
-| 3 | Mic only | audio pipeline alone |
+| Baseline (wake lock, radio, process) | ~115 mA | ~7 pts |
+| **Video pipeline** | **~533 mA (78 %)** | ~36.5 pts |
+| Audio pipeline (marginal) | ~35 mA (5 %) | ~12.7 pts |
 
-Five minutes each is plenty — the numbers are steady within a couple of samples. Keep the scene,
-lighting and room temperature identical, stay on Wi-Fi, and stay unplugged.
+**Conclusion: the draw is dominated by the camera, ISP and radio — the irreducible cost of the
+workload.** ~683 mA at 720p30 is a normal figure for it. The levers that actually move it are the
+ones already exposed to the user: resolution, frame rate, and running camera-only when the mic isn't
+needed.
 
-Reading it:
+### The audio finding (fixed)
 
-* **Mic-only lands at 20–30 %** → the APM is the cost. The fix is to pass explicit constraints
-  turning AEC/NS/AGC off, gated behind the existing raw-mic flag so the default sound is unchanged.
-* **Camera-only carries most of it** → the rotation is the cost. The fix is to stop rotating on the
-  phone and use the receiver's existing rotate control instead (PC-side rotation is nearly free —
-  `video_sink.cpp` already does it).
-* **Both are substantial** → they are additive and both fixes apply.
+The 12.7 CPU points were libwebrtc's **software** audio processing — AEC3, noise suppression, auto
+gain, high-pass — which the "raw mic" option did not disable (it only turned off the *hardware*
+AEC/NS on the audio device module). A phone used as a standalone remote mic has nothing to
+echo-cancel. `WebRtcSender.audioConstraintPairs()` now turns it off in raw-mic mode and deliberately
+leaves it **on** when the user has ticked "Phone-call noise filter". Worth ~35 mA at most — real, but
+small next to the video.
 
-Either fix must then be re-measured the same way before it is kept: the point is a lower `currentUA`
-at the same `capFps`/`encKbps`, not a lower CPU number on its own.
+### The rotation question (open — measure it with the switch, not by holding the phone)
 
----
+The camera sensor is landscape-native, so a phone held in portrait makes libwebrtc rotate every frame
+90° before encode (`capGeom=1280x720` but encoded `720x1280`). libdatachannel never offers the
+`urn:3gpp:video-orientation` extension, so that rotation cannot be signalled in RTP and has to be
+applied to pixels.
+
+**Do not try to remove it by holding the phone sideways.** That was tried and produced an unreadable
+result: the frame rate dropped to 23 fps (dim light), the phone was at 11 % battery and thermally
+throttled, and the screen had to stay on — three confounds moving at once, each larger than the
+effect. It also can't reflect real use, where the screen is off and the rotation always applies.
+
+Instead: **Diagnostics → "Measure: skip image rotation"**. That hands frames downstream with rotation
+0 so nothing rotates them, with the phone left exactly where it is. One variable changes.
+
+1. Diagnostics **on**, Mode **Camera**, phone in its normal position on something static.
+2. Run A: switch **off**, 5 min. Stop, share diagnostics.
+3. Cool down 3 min.
+4. Run B: switch **on**, 5 min. Stop, share diagnostics.
+
+Read **`cpuPerFps`**, not `cpu=`. Raw CPU is not comparable between runs whose frame rate differs —
+that is exactly what made the first attempt unreadable. Also confirm the encoded size in
+`webrtc_stats` flips from `720x1280` to `1280x720`; if it doesn't, the switch didn't take effect.
+
+If `cpuPerFps` drops materially, the rotation is on the CPU and is worth removing for real — by
+sending the rotation as a field in the status message the phone already pushes every minute, so the
+receiver applies it with its existing (essentially free) rotate path. If it doesn't move, the
+rotation is on the GPU, and there is nothing to win.
+
+While the switch is on the picture arrives sideways on the PC; use the receiver's Rotate control to
+watch it. It is a measurement control, which is why it lives under Diagnostics and is off by default.
+
+### Rules that made the difference
+
+- Compare **`cpuPerFps`**, never raw `cpu=`.
+- Discard any run with `thermal=` above 0 or `batt=` under ~20 — both change CPU clocks.
+- Start each run from a comparable temperature; 3 minutes of cool-down is usually enough.
+- Ignore the first sample of a session: it covers the window before capture reached steady state.
 
 ## 5. Platform profilers (independent of our telemetry)
 

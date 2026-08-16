@@ -11,10 +11,17 @@ android {
 
     defaultConfig {
         applicationId = "com.phonecam"
-        minSdk = 21
+        // 23, not 21. The USB video path calls MediaCodec.setCallback(Callback, Handler) — the
+        // Handler overload is API 23 — and it MUST pass a Handler, because without one MediaCodec
+        // dispatches encoder output on the main looper and the socket write throws
+        // NetworkOnMainThreadException. On API 21/22 that call would have been a NoSuchMethodError at
+        // runtime, i.e. the cable path was already broken there; declaring 21 only hid it.
+        // Nothing is really lost: foregroundServiceType is API 29, the FOREGROUND_SERVICE permission
+        // is 28, and this app is a Camera2 + WebRTC client. Android 6.0 is a floor it already had.
+        minSdk = 23
         targetSdk = 34
-        versionCode = 40
-        versionName = "0.6.2"
+        versionCode = 41
+        versionName = "0.6.3"
 
         ndk {
             // Ship only ARM ABIs: the org.webrtc native lib is large and x86/x86_64 are emulator-only

@@ -315,13 +315,15 @@ object Diag {
         sb.append(' ').append(b.toKv())
 
         // --- process CPU (own /proc/self/stat — no root, no other-process access) ---
+        var cpuPct = -1.0
         val ticks = readSelfCpuTicks()
         if (ticks >= 0) {
             if (lastCpuTicks >= 0) {
                 val d = ticks - lastCpuTicks
                 cpuTicksTotal += d
                 val cpuMs = d * 1000.0 / clockTicksPerSec
-                sb.append(" cpu=").append(fmt1(100.0 * cpuMs / dtMs)).append('%')
+                cpuPct = 100.0 * cpuMs / dtMs
+                sb.append(" cpu=").append(fmt1(cpuPct)).append('%')
             }
             lastCpuTicks = ticks
         } else sb.append(" cpu=n/a")
@@ -329,9 +331,14 @@ object Diag {
 
         // --- observed pipeline rates over this window (from the hot-path counters) ---
         val cam = c.cameraFrames.get(); val enc = c.framesEncoded.get(); val bytes = c.encodedBytes.get()
-        sb.append(" capFps=").append(fmt1((cam - lastCamFrames) * 1000.0 / dtMs))
+        val capFps = (cam - lastCamFrames) * 1000.0 / dtMs
+        sb.append(" capFps=").append(fmt1(capFps))
         sb.append(" encFps=").append(fmt1((enc - lastEncFrames) * 1000.0 / dtMs))
         sb.append(" encKbps=").append(fmt1((bytes - lastEncBytes) * 8.0 / dtMs))
+        // CPU normalised per captured frame. Raw cpu% is not comparable between runs whose frame rate
+        // differs — dim light alone drops the sensor to 23 fps and takes CPU down with it, which is
+        // exactly what made the first rotation A/B unreadable. This is the number to compare.
+        if (cpuPct >= 0 && capFps > 1.0) sb.append(" cpuPerFps=").append(fmt2(cpuPct / capFps))
         lastCamFrames = cam; lastEncFrames = enc; lastEncBytes = bytes
 
         // --- thermal (status is event-driven; headroom is a forecast the platform rate-limits) ---

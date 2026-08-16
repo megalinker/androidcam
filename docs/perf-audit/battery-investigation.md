@@ -4,7 +4,11 @@ Follow-up to the 2026-07-18 audit (`performance-findings.md`), scoped to the que
 Android app drawing more power than the workload justifies?"** plus two adjacent asks: show the phone
 battery on the PC, and investigate the occasional visual artifact without paying for it in battery.
 
-**Hardware status: no Android device was attached during this work** (`adb devices` empty). Every
+**UPDATE 2026-08-16 — measured on hardware.** See "Measured results" below; the headline is that
+~683 mA at 720p30 is dominated by camera + ISP + radio, and one real finding (libwebrtc's software
+audio processing, ~12.7 CPU points) has been fixed. The original text below is left as written.
+
+**Hardware status at the time of writing: no Android device was attached during this work** (`adb devices` empty). Every
 magnitude below is therefore either (a) a structural fact read off the code, or (b) an *expected*
 effect with the procedure to measure it. Nothing here is presented as a measured result unless it
 says so. The whole point of the diagnostics added in this pass is that the next person does not have
@@ -267,3 +271,88 @@ moves to the decoder, `sws_scale`/`VideoSink`, or softcam.
 6. **Power rails** need a Pixel 6 or later. The reported test device (Pixel 10 Pro) qualifies.
 7. **A second Android model.** All camera/encoder findings are HAL-dependent; the diagnostics report
    requested-vs-actual precisely so another device can be checked quickly.
+
+
+---
+
+# Measured results (2026-08-16, Pixel 9 Pro XL, Android sdk 37)
+
+720p30 over Wi-Fi, unplugged, diagnostics on. Current derived from the **charge counter** over settled
+windows — `CURRENT_NOW` is far too noisy on this device (it swings ±40 % sample to sample).
+
+## Mode sweep — three 5-minute runs
+
+| Mode | Current | CPU | Media |
+|---|---|---|---|
+| Cam + Mic | **683 mA** | 56.3 % | 2.30 Mbps video + 96 kbps audio |
+| Camera only | **648 mA** | 43.6 % | 2.15 Mbps video |
+| Mic only | **150 mA** | 19.8 % | 96 kbps audio |
+
+Decomposition:
+
+| Component | Power | CPU |
+|---|---|---|
+| Baseline (wake lock, radio, process) | ~115 mA | ~7 pts |
+| **Video pipeline** | **~533 mA (78 %)** | ~36.5 pts |
+| Audio pipeline (marginal) | ~35 mA (5 %) | ~12.7 pts |
+
+Battery life implied: ~15 %/h, roughly 6.5–7 h of continuous streaming from full on a 5060 mAh pack.
+
+**Verdict on the original question: the drain is the expected cost of the workload.** The camera
+sensor, the ISP and the Wi-Fi radio account for the overwhelming majority, and no code change reaches
+them. The user-facing levers (resolution, frame rate, camera-only) remain the only large ones.
+
+## B-08 · libwebrtc's software audio processing ran even in raw-mic mode *(fixed)*
+
+`createAudioSource(MediaConstraints())` passed empty constraints, so libwebrtc's APM — AEC3, noise
+suppression, auto gain, high-pass — ran on every 10 ms frame. The 0.6.0 "raw mic" work disabled the
+*hardware* AEC/NS on the audio device module but never touched this. A phone acting as a standalone
+remote mic has no local playback to echo-cancel.
+
+Measured cost: **12.7 CPU points**, about a quarter of the app's total CPU, for **~35 mA**.
+
+Fixed in `WebRtcSender.audioConstraintPairs()`, gated on the existing `rawMic` flag so that a user who
+ticks "Phone-call noise filter" still gets the processing they asked for. Covered by
+`AudioConstraintsTest`, which pins both directions — the regression that would matter most is
+silently disabling processing for someone who wanted it.
+
+## B-09 · Pre-encode pixel rotation — open, now measurable
+
+`capGeom=1280x720` with an encoded `720x1280` confirms libwebrtc rotates every frame 90° before
+encoding, because libdatachannel never offers `urn:3gpp:video-orientation` and the rotation therefore
+cannot be signalled in RTP.
+
+**Attempting to measure this by holding the phone in landscape does not work.** It was tried: the
+rotation did disappear (encoded size became `1280x720`, so the mechanism is real), but the run was
+unusable — 23 fps instead of 30 from dim light, 11 % battery, thermal throttling active, and the
+screen forced on. Normalising for frame rate, CPU per frame was **1.50 vs 1.45** — i.e. no
+improvement, but with three confounds each larger than the effect. It also cannot represent real use,
+where the screen is off and the rotation always applies.
+
+Replaced with a controlled switch: **Diagnostics → "Measure: skip image rotation"** presents frames
+downstream with rotation 0, changing exactly one variable with the phone untouched. Procedure and the
+`cpuPerFps` metric to read are in `docs/diagnostics.md` §4b.
+
+If it proves to cost real CPU, the fix is to stop rotating on the phone and carry the rotation as a
+field in the status message the phone already sends the PC every minute, so the receiver applies it
+through its existing (essentially free) rotate path — CVO in spirit, over our own control channel.
+
+## Confirmations from the hardware runs
+
+* **B-01 works.** Run 1 shows `camera_prepared` at 105 ms and `camera_started` at **10196 ms** — the
+  PC was not listening yet and the camera correctly stayed off for those 10 s. Runs where the PC was
+  ready started capture in ~200 ms.
+* **The encoder is hardware**: `enc=c2.exynos.h264.encoder` on every run.
+* **No frames are dropped between capture and encode**: `capFps` equals `encFps` exactly.
+* **The artifact recovery fires.** In a 2.8 h session: `rin lost 93 → 122`, then `pli 7 → 8`, then
+  `key 8 → 9`. Also confirmed the diagnosis — only **8 keyframes in 2.8 hours**, so before this work a
+  lost packet had essentially nothing to clear the corruption.
+
+## Deliberately not changed
+
+* **Audio bitrate.** Opus is running at ~96 kbps, roughly 3× a typical voice configuration. Capping it
+  would save a little radio power, but audio is only ~5 % of total draw and the mic quality was
+  deliberately tuned in 0.6.0. Trading audible quality for a fraction of 5 % is exactly the trade the
+  brief rules out.
+* **Capture resolution/frame rate.** These are the user's choice and the honest large lever; the app
+  should not quietly reduce what the UI promises.

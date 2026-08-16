@@ -54,6 +54,9 @@ class WebRtcSender(
     private val videoH: Int,
     private val videoFps: Int,
     private val rawMic: Boolean = false,        // true = disable HW AEC/NS (clean remote mic) (F-12)
+    // Measurement only: send frames with rotation 0 so libwebrtc does not rotate pixels before
+    // encoding. Off by default; see CountingCapturerObserver.
+    private val stripRotation: Boolean = false,
     private val onState: (State) -> Unit,
 ) {
     enum class State { CONNECTING, CONNECTED, DISCONNECTED, FAILED }
@@ -150,11 +153,16 @@ class WebRtcSender(
         // sendonly (our sendrecv ∩ their recvonly-offer).
         // Mic track only when the mode wants it — Camera-only must NOT leak the mic.
         if (withAudio) {
-            val src = factory!!.createAudioSource(MediaConstraints())
+            val constraints = MediaConstraints().apply {
+                for ((k, v) in audioConstraintPairs(rawMic)) mandatory.add(MediaConstraints.KeyValuePair(k, v))
+            }
+            val src = factory!!.createAudioSource(constraints)
             audioSource = src
             val track = factory!!.createAudioTrack("mic0", src).apply { setEnabled(true) }
             audioTrack = track
             peer.addTrack(track, listOf("pcam"))
+            Diag.event("audio_started", "transport=webrtc", "rawMic=${if (rawMic) 1 else 0}",
+                "apm=${if (rawMic) "off" else "on"}")
         }
 
         // Camera → H.264 video track (added after audio to match the PC offer's m-line order).
@@ -193,7 +201,10 @@ class WebRtcSender(
         sendMsg(out, 'A', local.description.toByteArray(Charsets.UTF_8))
         Log.i(TAG, "webrtc: answer sent — media negotiating")
         Diag.event("transport_connected", "transport=webrtc", "sdpBytes=${local.description.length}")
-        if (Diag.on) Diag.addSampler(statsSampler)
+        if (Diag.on) {
+            Diag.addSampler(statsSampler)
+            pollWebrtcStats()   // prime it, so the first 30 s sample already has real encode numbers
+        }
 
         // The signaling socket stays open for the rest of the session. Historically it was only read
         // to notice EOF (the PC pressing Stop); it is now also the control channel: the PC may send a
@@ -295,7 +306,8 @@ class WebRtcSender(
         // Count capture frames and record the geometry the camera ACTUALLY produced (which can differ
         // from the request — Camera2Enumerator snaps to a supported format). One atomic add per frame.
         // Only inserted when diagnostics are on, so the production capture path is unchanged.
-        val obs = if (Diag.on) CountingCapturerObserver(vsrc.capturerObserver).also { captureStats = it }
+        val obs = if (Diag.on || stripRotation)
+                      CountingCapturerObserver(vsrc.capturerObserver, stripRotation).also { captureStats = it }
                   else vsrc.capturerObserver
         capturer.initialize(helper, appCtx, obs)
         Diag.event("camera_prepared", "transport=webrtc", "cam=$camName",
@@ -363,11 +375,30 @@ class WebRtcSender(
      */
     private class CountingCapturerObserver(
         private val delegate: org.webrtc.CapturerObserver,
+        /**
+         * Measurement mode: hand every frame downstream with rotation 0, so libwebrtc has no rotation
+         * to bake into the pixels before encoding.
+         *
+         * Why this exists: the camera sensor is landscape-native, so a phone held in portrait makes
+         * libwebrtc rotate every frame 90° before encode (visible as capGeom 1280x720 but an encoded
+         * 720x1280). libdatachannel never offers the `urn:3gpp:video-orientation` extension, so the
+         * rotation cannot be signalled in RTP and has to be applied to the image.
+         *
+         * Trying to remove that by physically holding the phone sideways does not give a clean
+         * measurement — frame rate, lighting and thermal state all move at the same time, which is
+         * exactly what confounded the first attempt. Toggling it here changes ONE variable with the
+         * phone untouched, which is the only way to price it honestly.
+         *
+         * The received image arrives sideways while this is on; the receiver's Rotate control fixes
+         * the view. That is why it lives under Diagnostics and is off by default.
+         */
+        private val stripRotation: Boolean,
     ) : org.webrtc.CapturerObserver {
         @Volatile var lastW = 0
         @Volatile var lastH = 0
         override fun onCapturerStarted(success: Boolean) {
-            Diag.event("camera_capture_started", "ok=${if (success) 1 else 0}")
+            Diag.event("camera_capture_started", "ok=${if (success) 1 else 0}",
+                "stripRotation=${if (stripRotation) 1 else 0}")
             delegate.onCapturerStarted(success)
         }
         override fun onCapturerStopped() {
@@ -379,7 +410,16 @@ class WebRtcSender(
                 Diag.c.cameraFrames.incrementAndGet()
                 lastW = frame.buffer.width; lastH = frame.buffer.height
             }
-            delegate.onFrameCaptured(frame)
+            if (!stripRotation || frame.rotation == 0) {
+                delegate.onFrameCaptured(frame)
+                return
+            }
+            // Re-wrap the SAME buffer with rotation 0. VideoFrame's constructor does not take a
+            // reference, so retain before and release after: the capturer's own reference is
+            // untouched and the buffer cannot be freed under the consumer.
+            frame.buffer.retain()
+            val unrotated = org.webrtc.VideoFrame(frame.buffer, 0, frame.timestampNs)
+            try { delegate.onFrameCaptured(unrotated) } finally { unrotated.release() }
         }
     }
 
@@ -544,6 +584,35 @@ class WebRtcSender(
         private const val SIGNAL_CONNECT_TIMEOUT_MS = 3000
         private const val SIGNAL_RETRY_MS = 2000L
         private val factoryInited = AtomicBoolean(false)
+
+        /**
+         * Audio-source constraints for the two mic modes.
+         *
+         * `rawMic = true` (the default — the desktop app's "Phone-call noise filter" unchecked) turns
+         * libwebrtc's **software** audio processing off: echo cancellation, noise suppression, auto
+         * gain and the high-pass filter. Measured on a Pixel 9 Pro XL, that processing costs ~12.7
+         * percentage points of one CPU core — about a quarter of the app's total CPU — and a phone
+         * used as a standalone remote mic has no local playback to echo-cancel, so AEC in particular
+         * is pure overhead. This is the software half of the same decision F-12 already made for the
+         * *hardware* AEC/NS on the audio device module.
+         *
+         * `rawMic = false` leaves everything on: the user ticked the box precisely because they are in
+         * a noisy room and want the processing.
+         *
+         * Both the legacy `goog*` names and the modern short names are set — libwebrtc has accepted
+         * both spellings across versions, and an unrecognised key is ignored rather than fatal.
+         */
+        fun audioConstraintPairs(rawMic: Boolean): List<Pair<String, String>> {
+            if (!rawMic) return emptyList()   // keep libwebrtc's defaults = all processing enabled
+            val off = "false"
+            return listOf(
+                "googEchoCancellation" to off, "echoCancellation" to off,
+                "googNoiseSuppression" to off, "noiseSuppression" to off,
+                "googAutoGainControl" to off,  "autoGainControl" to off,
+                "googHighpassFilter" to off,
+                "googTypingNoiseDetection" to off,
+            )
+        }
 
         /** PeerConnectionFactory.initialize must run once per process before any factory is built. */
         private fun ensureFactoryInit(ctx: Context) {
