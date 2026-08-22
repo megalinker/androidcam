@@ -40,7 +40,13 @@ object PhoneStatus {
      * Encode a status message. Unavailable fields are **omitted** rather than sent as a made-up
      * number, so the PC can distinguish "unknown" from "0".
      */
-    fun encode(b: Diag.Battery, sessionId: String, tsMs: Long): String {
+    fun encode(
+        b: Diag.Battery, sessionId: String, tsMs: Long,
+        /** Rotation the PC must apply because we are no longer applying it (-1 = we still rotate). */
+        rotation: Int = -1,
+        /** Our capture geometry BEFORE rotation, so the PC can size the virtual camera from it. */
+        videoW: Int = 0, videoH: Int = 0,
+    ): String {
         val sb = StringBuilder(112)
         sb.append("{\"t\":\"status\",\"v\":").append(PROTO_VERSION)
         sb.append(",\"ts\":").append(tsMs)
@@ -51,6 +57,9 @@ object PhoneStatus {
         if (b.status != 1 /* BATTERY_STATUS_UNKNOWN */) sb.append(",\"st\":").append(b.status)
         if (b.tempDeciC != Int.MIN_VALUE)
             sb.append(",\"tempC\":").append(String.format(java.util.Locale.US, "%.1f", b.tempDeciC / 10.0))
+        if (rotation >= 0) sb.append(",\"rot\":").append(((rotation % 360) + 360) % 360)
+        if (videoW > 0 && videoH > 0)
+            sb.append(",\"vw\":").append(videoW).append(",\"vh\":").append(videoH)
         sb.append('}')
         return sb.toString()
     }
@@ -58,6 +67,16 @@ object PhoneStatus {
     /** True if the PC's hello advertises the device-status feature. */
     fun helloSupportsStatus(payload: String): Boolean =
         payload.contains("\"status\"") || payload.contains("status")
+
+    /**
+     * True if the PC will apply the image rotation itself.
+     *
+     * When it does, we stop rotating frames before encoding and just report the angle. Measured on a
+     * Pixel 9 Pro XL, that rotation cost ~6 points of one CPU core at 720p and ~42 at 1080p - by far
+     * the largest avoidable draw found. A PC that does not advertise this keeps getting pre-rotated
+     * frames exactly as before.
+     */
+    fun helloSupportsRotation(payload: String): Boolean = payload.contains("\"rotation\"")
 
     /** Guard against a stray quote/backslash ever reaching the wire from an id we generated. */
     private fun sanitize(s: String): String {

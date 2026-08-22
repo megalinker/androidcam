@@ -475,7 +475,13 @@ static void handleConnection(SOCKET cli, const AVCodec *dec,
         if (r == 0) continue;
         if (t == 'B') {
             PhoneStatusMsg st = phonestatus::parse(payload);
-            if (st.valid) { ++statusMsgs; phonestatus::emit(st); }
+            if (st.valid) {
+                ++statusMsgs;
+                phonestatus::emit(st);
+                // The phone stopped rotating its own frames (it costs it ~6-42 CPU points);
+                // it now tells us the angle and its capture geometry, and we apply both here.
+                VideoSetPhoneGeometry(st.videoW, st.videoH, st.rotation);
+            }
         } else if (++unknownMsgs <= 5) {
             // A newer phone may send message types we don't know; ignoring them is the compatibility
             // contract. Log only the first few so a chatty peer can never flood the desktop app's log.

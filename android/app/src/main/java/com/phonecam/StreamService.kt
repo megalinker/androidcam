@@ -157,8 +157,16 @@ class StreamService : Service() {
 
     /** Read the battery (one sticky-intent lookup) and hand it to the active transport. */
     private fun pushStatus() {
+        val sender = webrtcSender
         val json = runCatching {
-            PhoneStatus.encode(Diag.readBattery(applicationContext), Diag.sessionId, System.currentTimeMillis())
+            PhoneStatus.encode(
+                Diag.readBattery(applicationContext), Diag.sessionId, System.currentTimeMillis(),
+                // Video geometry rides the same message: the PC needs the rotation we stopped
+                // applying, and our capture size so the virtual camera matches the chosen quality
+                // instead of being pinned to 720.
+                rotation = sender?.reportedRotation ?: -1,
+                videoW = sender?.reportedWidth ?: 0,
+                videoH = sender?.reportedHeight ?: 0)
         }.getOrNull() ?: return
         webrtcSender?.sendStatus(json)
         usbStreamer?.sendStatus(json)
@@ -320,6 +328,9 @@ class StreamService : Service() {
             // The PC announces device-status support on the signaling socket; send the first reading
             // the moment it does, so the desktop shows a battery level without waiting a minute.
             sender.onStatusChannelReady = { postStatus() }
+            // Turning the phone changes the rotation the PC must apply — tell it immediately rather
+            // than leaving the picture sideways until the next minute-ly heartbeat.
+            sender.onVideoGeometryChanged = { postStatus() }
             webrtcSender = sender
             sender.start()
             streamUrl = sigHost

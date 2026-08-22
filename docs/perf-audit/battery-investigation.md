@@ -356,3 +356,60 @@ through its existing (essentially free) rotate path — CVO in spirit, over our 
   brief rules out.
 * **Capture resolution/frame rate.** These are the user's choice and the honest large lever; the app
   should not quietly reduce what the UI promises.
+
+
+---
+
+# Measured results round 2 (2026-08-17, same Pixel 9 Pro XL)
+
+720p30 / 1080p30 over Wi-Fi, unplugged, per-thread CPU enabled. Current from the charge counter over
+settled windows.
+
+| | 720p, phone rotating | 720p, **rotation stripped** | 1080p, phone rotating |
+|---|---|---|---|
+| Current | 687 mA | **564 mA** | **796 mA** |
+| CPU | 58.0 % | 57.4 % | **98.4 %** |
+| cpuPerFps | 1.94 | 1.91 | 3.28 |
+| **CaptureThread** | **11.3 %** | **4.9 %** | **41.9 %** |
+| Video | 1.93 Mbps | 3.14 Mbps | 6.88 Mbps |
+| Audio | 54 kbps | 53 kbps | 53 kbps |
+
+## B-09 resolved: the pre-encode rotation is CPU work *(fixed)*
+
+`CaptureThread` drops **11.3 % -> 4.9 %** with rotation stripped, same resolution and frame rate. At
+1080p the same thread sits at **41.9 %**. The earlier tentative read — "probably GPU, not worth
+chasing" — was wrong, and it was wrong because it came from a whole-process number with three
+confounds in it. The per-thread line (D-01) settled it from a single run.
+
+Fix: the phone now sends sensor-native frames and reports the angle in the status message it already
+sends; `VideoSink` applies it, composed with the user's manual Rotate/Mirror/Flip. Gated on the PC
+advertising `"rotation"` in its hello, so an older receiver keeps getting pre-rotated frames.
+
+This is not a change to the "orientation is manual" rule: the phone was *already* auto-orienting
+(libwebrtc baked device rotation into the pixels). The automatic part moved to the side where it is
+free.
+
+## B-06 resolved: 1080p was pure waste *(fixed)*
+
+At 1080p the phone captured, encoded and transmitted full 1920x1080 — **+109 mA, a saturated CPU
+core, 3.5x the bitrate** — and the receiver logged `source 1920x1080 -> 1280x720`, discarding the
+extra pixels because the virtual camera was pinned to "short side -> 720".
+
+Fix: the phone reports its capture geometry in the same status message and `VideoSink` sizes the
+virtual camera from it (capped at 1920x1080, beyond which every frame is a 24 MB BGR buffer to
+convert and push 30 times a second). Softcam must be created exactly once per session — recreating it
+under a live consumer crashes — so the sink waits up to 1 s for that first status before sizing, and
+falls back to the old rule if it never arrives.
+
+## N-02 was wrong
+
+The phone answered `profile-level-id=42e01f` (level 3.1) and encoded 1080p anyway: level asymmetry
+means it picks its own sending level and libwebrtc does not enforce the advertised one. Level 3.1
+never blocked 1080p. The raise to 5.1 is harmless and stops us under-advertising our decoder, but it
+fixed nothing.
+
+## N-01 confirmed working, and worth nothing in battery
+
+Audio went **96 -> 54 kbps**, mono, `apm=off`. Current: 687 mA versus the 683 mA baseline — no
+measurable change. Consistent with audio being ~35 mA marginal to begin with. The bytes and encoder
+work are genuinely lower; the battery does not notice. An honest negative.

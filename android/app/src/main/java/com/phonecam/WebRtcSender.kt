@@ -88,6 +88,20 @@ class WebRtcSender(
 
     /** Counts capture frames + observes the real capture geometry, at one atomic add per frame. */
     private var captureStats: CountingCapturerObserver? = null
+
+    /**
+     * Set once the PC's hello says it will apply the image rotation itself. Read per frame, so it can
+     * flip mid-stream: the hello arrives just after the answer, before media actually flows, so in
+     * practice the very first transmitted frame is already unrotated.
+     */
+    @Volatile private var pcAppliesRotation = false
+    /** Invoked when the rotation we are NOT applying changes, so the service can push it right away. */
+    @Volatile var onVideoGeometryChanged: (() -> Unit)? = null
+
+    /** The rotation the PC must apply, or -1 while we are still rotating frames ourselves. */
+    val reportedRotation: Int get() = if (pcAppliesRotation || stripRotation) captureStats?.lastRotation ?: 0 else -1
+    val reportedWidth: Int get() = captureStats?.lastW ?: 0
+    val reportedHeight: Int get() = captureStats?.lastH ?: 0
     private val statsSampler = Runnable { pollWebrtcStats() }
 
     fun start() {
@@ -231,6 +245,13 @@ class WebRtcSender(
         when (type) {
             PhoneStatus.MSG_HELLO -> {
                 val body = String(payload, Charsets.UTF_8)
+                if (PhoneStatus.helloSupportsRotation(body)) {
+                    // Hand the rotation to the PC, where a BGR rotate is free, instead of paying for
+                    // it on every captured frame here.
+                    pcAppliesRotation = true
+                    captureStats?.stripRotation = true
+                    Diag.event("rotation_delegated", "peer=pc")
+                }
                 if (PhoneStatus.helloSupportsStatus(body)) {
                     statusSupported = true
                     Diag.event("status_channel_ready", "peer=pc")
@@ -306,9 +327,11 @@ class WebRtcSender(
         // Count capture frames and record the geometry the camera ACTUALLY produced (which can differ
         // from the request — Camera2Enumerator snaps to a supported format). One atomic add per frame.
         // Only inserted when diagnostics are on, so the production capture path is unchanged.
-        val obs = if (Diag.on || stripRotation)
-                      CountingCapturerObserver(vsrc.capturerObserver, stripRotation).also { captureStats = it }
-                  else vsrc.capturerObserver
+        // Always installed now: it carries the rotation hand-off, not just the counters. Its cost is
+        // one virtual call and three volatile stores per frame — far below the rotation it removes.
+        val obs = CountingCapturerObserver(
+            vsrc.capturerObserver, stripRotation || pcAppliesRotation
+        ) { runCatching { onVideoGeometryChanged?.invoke() } }.also { captureStats = it }
         capturer.initialize(helper, appCtx, obs)
         Diag.event("camera_prepared", "transport=webrtc", "cam=$camName",
             "reqW=$videoW", "reqH=$videoH", "reqFps=$videoFps")
@@ -395,10 +418,13 @@ class WebRtcSender(
          * The received image arrives sideways while this is on; the receiver's Rotate control fixes
          * the view. That is why it lives under Diagnostics and is off by default.
          */
-        private val stripRotation: Boolean,
+        @Volatile @JvmField var stripRotation: Boolean,
+        /** Called when the rotation we hand to the PC changes (the user turned the phone). */
+        private val onRotationChanged: () -> Unit = {},
     ) : org.webrtc.CapturerObserver {
         @Volatile var lastW = 0
         @Volatile var lastH = 0
+        @Volatile var lastRotation = 0
         override fun onCapturerStarted(success: Boolean) {
             Diag.event("camera_capture_started", "ok=${if (success) 1 else 0}",
                 "stripRotation=${if (stripRotation) 1 else 0}")
@@ -409,9 +435,13 @@ class WebRtcSender(
             delegate.onCapturerStopped()
         }
         override fun onFrameCaptured(frame: org.webrtc.VideoFrame) {
-            if (Diag.on) {   // one volatile read when diagnostics are off; nothing else
-                Diag.c.cameraFrames.incrementAndGet()
-                lastW = frame.buffer.width; lastH = frame.buffer.height
+            if (Diag.on) Diag.c.cameraFrames.incrementAndGet()   // one volatile read when off
+            // Geometry is what the PC needs to size the virtual camera, so it is tracked even when
+            // diagnostics are off. Three volatile stores per frame, no allocation.
+            lastW = frame.buffer.width; lastH = frame.buffer.height
+            if (stripRotation && frame.rotation != lastRotation) {
+                lastRotation = frame.rotation
+                runCatching { onRotationChanged() }   // tell the PC at once; do not wait for the heartbeat
             }
             if (!stripRotation || frame.rotation == 0) {
                 Diag.trace("pcam.capture") { delegate.onFrameCaptured(frame) }   // D-02

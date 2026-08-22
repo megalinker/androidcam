@@ -73,6 +73,48 @@ class PhoneStatusTest {
         assertEquals("quotes must stay balanced: $j", 0, j.count { it == '"' } % 2)
     }
 
+    @Test fun `rotation and geometry are only sent when the phone has stopped rotating`() {
+        // rotation = -1 means "we are still rotating the pixels ourselves", so the PC must not be
+        // told to rotate again — that would double-apply it and stand the picture on its side.
+        val still = PhoneStatus.encode(battery(), "s", 1L, rotation = -1, videoW = 1280, videoH = 720)
+        assertFalse(still, still.contains("\"rot\""))
+        val handed = PhoneStatus.encode(battery(), "s", 1L, rotation = 90, videoW = 1280, videoH = 720)
+        assertTrue(handed, handed.contains("\"rot\":90"))
+        assertTrue(handed, handed.contains("\"vw\":1280"))
+        assertTrue(handed, handed.contains("\"vh\":720"))
+    }
+
+    @Test fun `zero rotation is still reported`() {
+        // 0 is a real answer ("landscape, nothing to do"), distinct from -1 ("I rotated it myself").
+        assertTrue(PhoneStatus.encode(battery(), "s", 1L, rotation = 0).contains("\"rot\":0"))
+    }
+
+    @Test fun `rotation is normalised into 0-359`() {
+        assertTrue(PhoneStatus.encode(battery(), "s", 1L, rotation = 450).contains("\"rot\":90"))
+    }
+
+    @Test fun `geometry is omitted when unknown`() {
+        val j = PhoneStatus.encode(battery(), "s", 1L, rotation = 90, videoW = 0, videoH = 0)
+        assertFalse(j, j.contains("vw"))
+        assertFalse(j, j.contains("vh"))
+    }
+
+    @Test fun `defaults keep the legacy payload unchanged`() {
+        // An unchanged call site must not start emitting the new fields: an older receiver would then
+        // see keys it ignores, but more importantly the phone would still be rotating.
+        val j = PhoneStatus.encode(battery(), "s", 1L)
+        assertFalse(j, j.contains("rot"))
+        assertFalse(j, j.contains("vw"))
+    }
+
+    @Test fun `hello rotation feature is recognised only when advertised`() {
+        assertTrue(PhoneStatus.helloSupportsRotation(
+            "{\"feat\":[\"status\",\"mark\",\"keyframe\",\"rotation\"]}"))
+        assertFalse(PhoneStatus.helloSupportsRotation(
+            "{\"feat\":[\"status\",\"mark\"]}"))
+        assertFalse(PhoneStatus.helloSupportsRotation(""))
+    }
+
     @Test fun `hello gating recognises the PC's feature list`() {
         assertTrue(PhoneStatus.helloSupportsStatus(
             "{\"t\":\"hello\",\"app\":\"phonecam\",\"v\":1,\"feat\":[\"status\",\"mark\",\"keyframe\"]}"))

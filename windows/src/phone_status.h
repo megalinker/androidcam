@@ -27,6 +27,13 @@ struct PhoneStatusMsg {
     int   plug = 0;            // BatteryManager.BATTERY_PLUGGED_* (0 = not plugged)
     float tempC = -1000.0f;    // -1000 = unavailable
     std::string sid;           // phone-side session id, for lining the two logs up
+    // Video geometry the phone is sending, when it supports reporting it (0 = not reported).
+    //   rotation: degrees clockwise WE must apply, because the phone is now sending sensor-native
+    //             frames instead of rotating them itself. -1 = the phone did not report it.
+    //   vw/vh:    the phone's selected capture geometry, PRE-rotation. Lets the virtual camera be
+    //             sized from what the user actually chose instead of a hardcoded 720.
+    int   rotation = -1;
+    int   videoW = 0, videoH = 0;
     bool  valid = false;
 };
 
@@ -88,6 +95,11 @@ inline PhoneStatusMsg parse(const std::string &json) {
     float t = 0.0f;
     if (floatField(json, "tempC", t) && t > -100.0f && t < 200.0f) m.tempC = t;
     strField(json, "sid", m.sid);
+    int r = 0;
+    if (intField(json, "rot", r) && (r == 0 || r == 90 || r == 180 || r == 270)) m.rotation = r;
+    int w = 0, h = 0;
+    if (intField(json, "vw", w) && intField(json, "vh", h) &&
+        w > 0 && h > 0 && w <= 8192 && h <= 8192) { m.videoW = w; m.videoH = h; }
     m.valid = true;
     return m;
 }
@@ -98,14 +110,19 @@ inline void emit(const PhoneStatusMsg &m) {
     char temp[16];
     if (m.tempC <= -1000.0f) std::snprintf(temp, sizeof temp, "n/a");
     else                     std::snprintf(temp, sizeof temp, "%.1f", m.tempC);
-    std::fprintf(stderr, "[status] battery=%d charging=%d plug=%d tempC=%s sid=%s\n",
-                 m.batteryPct, m.charging, m.plug, temp, m.sid.empty() ? "-" : m.sid.c_str());
+    std::fprintf(stderr, "[status] battery=%d charging=%d plug=%d tempC=%s sid=%s"
+                         " rot=%d video=%dx%d\n",
+                 m.batteryPct, m.charging, m.plug, temp, m.sid.empty() ? "-" : m.sid.c_str(),
+                 m.rotation, m.videoW, m.videoH);
     std::fflush(stderr);
 }
 
 /// The PC's hello, sent once per session so an older phone never has to know about any of this.
 inline std::string helloJson() {
-    return "{\"t\":\"hello\",\"app\":\"phonecam\",\"v\":1,\"feat\":[\"status\",\"mark\",\"keyframe\"]}";
+    // "rotation" tells the phone we will apply the image rotation ourselves, so it should send
+    // sensor-native frames and report the angle instead of burning CPU rotating every frame.
+    return "{\"t\":\"hello\",\"app\":\"phonecam\",\"v\":1,"
+           "\"feat\":[\"status\",\"mark\",\"keyframe\",\"rotation\"]}";
 }
 
 }  // namespace phonestatus

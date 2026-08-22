@@ -33,6 +33,9 @@ public:
 
 private:
     bool ensure(const AVFrame *f);
+    // True while we are still waiting for the phone to tell us its geometry/rotation. Bounded, so an
+    // older phone that never reports simply falls back after the timeout.
+    bool awaitingPhoneGeometry();
     void previewLoop();
 
     double      fps_ = 30.0;
@@ -46,6 +49,7 @@ private:
     std::vector<unsigned char> obuf_;           // transformed BGR (used when any rotate/flip is active)
     void       *cam_ = nullptr;   // softcam handle (void* to keep the header softcam-free)
     long        frames_ = 0;
+    unsigned long long firstFrameUs_ = 0;   // when video started, for the geometry-wait timeout
 
     // Preview thread + shared latest-BGR frame.
     std::thread              previewThread_;
@@ -63,3 +67,18 @@ void VideoSetRotate(int deg);    // 0/90/180/270 clockwise
 void VideoSetFlipH(bool on);     // mirror left/right
 void VideoSetFlipV(bool on);     // flip top/bottom
 void VideoSetPreviewVisible(bool on);   // GUI tells us when its embedded preview is hidden (F-34)
+
+/// The phone's video geometry and the rotation IT IS NO LONGER APPLYING, from its status message.
+///
+/// Measured on a Pixel 9 Pro XL: rotating frames on the phone before encoding cost ~6 points of one
+/// CPU core at 720p and ~42 points at 1080p — the single largest avoidable draw we found. So the
+/// phone now sends sensor-native frames and tells us the angle, and we rotate here, where a BGR
+/// rotate is free next to everything else the desktop is doing.
+///
+/// This is NOT a change to the "orientation is manual" rule: the phone was already auto-orienting
+/// (libwebrtc baked device rotation into the pixels). The automatic part just moved to the cheap
+/// side. The user's manual Rotate/Mirror/Flip still compose on top of it.
+///
+/// @param w,h  the phone's capture geometry BEFORE rotation (0 = not reported)
+/// @param rotationDeg  clockwise degrees to apply (-1 = the phone did not report; it rotated itself)
+void VideoSetPhoneGeometry(int w, int h, int rotationDeg);

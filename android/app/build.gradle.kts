@@ -20,8 +20,8 @@ android {
         // is 28, and this app is a Camera2 + WebRTC client. Android 6.0 is a floor it already had.
         minSdk = 23
         targetSdk = 34
-        versionCode = 42
-        versionName = "0.6.4"
+        versionCode = 43
+        versionName = "0.6.5"
 
         ndk {
             // Ship only ARM ABIs: the org.webrtc native lib is large and x86/x86_64 are emulator-only

@@ -28,11 +28,33 @@ std::atomic<int>  g_rotate{0};
 std::atomic<bool> g_flipH{false};
 std::atomic<bool> g_flipV{false};
 std::atomic<bool> g_previewVisible{true};   // F-34: false while the GUI's embedded preview is hidden/minimized
+// Phone-reported geometry + the rotation the phone is no longer applying itself (see video_sink.h).
+std::atomic<int>  g_phoneRotate{0};
+std::atomic<int>  g_phoneW{0};
+std::atomic<int>  g_phoneH{0};
+std::atomic<bool> g_phoneGeomKnown{false};
+
+// The virtual camera is capped here. 1080p honours the whole quality dropdown that a phone can
+// realistically sustain; beyond it every frame is a 24 MB BGR buffer to convert, transform and push
+// 30 times a second, which would cost the PC far more than the extra pixels are worth.
+constexpr int kMaxOutW = 1920, kMaxOutH = 1080;
+
+// How long to wait for the phone's first status before sizing the virtual camera from the frame
+// alone. Softcam must be created ONCE — recreating it while a conferencing app is reading crashes —
+// so it is worth a beat at session start to get the geometry right the first time. A phone that
+// never reports (an older build) just falls back after this.
+constexpr unsigned long long kGeometryWaitUs = 1000000;
 }
 void VideoSetRotate(int deg) { g_rotate = ((deg % 360) + 360) % 360; }
 void VideoSetFlipH(bool on)  { g_flipH = on; }
 void VideoSetFlipV(bool on)  { g_flipV = on; }
 void VideoSetPreviewVisible(bool on) { g_previewVisible = on; }
+void VideoSetPhoneGeometry(int w, int h, int rotationDeg) {
+    if (w > 0 && h > 0) { g_phoneW = w; g_phoneH = h; }
+    // -1 means the phone rotated the pixels itself (an older build), i.e. nothing for us to add.
+    g_phoneRotate = (rotationDeg < 0) ? 0 : (((rotationDeg % 360) + 360) % 360);
+    g_phoneGeomKnown = true;
+}
 
 // Rotate a packed BGR24 image (w×h) clockwise by deg into out (whose dims are per-deg). No-op for 0.
 static void rotateBgr(const unsigned char *src, int w, int h, int deg, unsigned char *out) {
@@ -70,13 +92,37 @@ static void flipBgr(unsigned char *buf, int w, int h, bool fh, bool fv) {
         }
 }
 
+// Softcam gets created exactly once per session, so it is worth a moment at the start to learn the
+// phone's geometry rather than guessing and then recreating the filter under a live consumer.
+bool VideoSink::awaitingPhoneGeometry() {
+    if (g_phoneGeomKnown.load() || targetW_ != 0) return false;
+    unsigned long long now = stats::nowUs();
+    if (firstFrameUs_ == 0) firstFrameUs_ = now;
+    return (now - firstFrameUs_) < kGeometryWaitUs;
+}
+
 bool VideoSink::ensure(const AVFrame *f) {
     // Fix the output geometry ONCE, from the first frame's aspect (short side -> 720). The virtual
     // camera then keeps a stable resolution for the whole call (Zoom/Teams glitch on mid-call changes)
     // and softcam is never recreated on the WebRTC resolution ramp — that churn was crashing us.
     if (targetW_ == 0) {
-        if (f->width >= f->height) { targetH_ = 720; targetW_ = ((720 * f->width  / f->height) + 2) & ~3; }
-        else                       { targetW_ = 720; targetH_ = ((720 * f->height / f->width)  + 2) & ~3; }
+        // Prefer the geometry the phone says it is capturing: the user picked it, and sizing from it
+        // is what stops a 1080p selection being downscaled to 720p here after the phone already paid
+        // to capture, encode and transmit every one of those pixels. Fall back to the old
+        // "short side -> 720" rule when the phone did not tell us (older build).
+        int pw = g_phoneW.load(), ph = g_phoneH.load();
+        if (pw > 0 && ph > 0) {
+            // Fit inside the cap without changing the aspect ratio.
+            double scale = 1.0;
+            if (pw > kMaxOutW) scale = (double)kMaxOutW / pw;
+            if (ph * scale > kMaxOutH) scale = (double)kMaxOutH / ph;
+            targetW_ = (int)(pw * scale + 2) & ~3;
+            targetH_ = (int)(ph * scale + 2) & ~3;
+        } else if (f->width >= f->height) {
+            targetH_ = 720; targetW_ = ((720 * f->width  / f->height) + 2) & ~3;
+        } else {
+            targetW_ = 720; targetH_ = ((720 * f->height / f->width)  + 2) & ~3;
+        }
     }
 
     // Scaler: (re)build only when the SOURCE resolution changes (the ramp). dst_ is the fixed target.
@@ -92,7 +138,8 @@ bool VideoSink::ensure(const AVFrame *f) {
 
     // Softcam + output buffer: (re)build only when the OUTPUT geometry changes — the first frame or a
     // manual rotation that swaps W/H. NEVER on the ramp.
-    int rot = g_rotate.load();
+    // The phone's rotation (which it no longer applies itself) plus the user's manual one.
+    int rot = (g_phoneRotate.load() + g_rotate.load()) % 360;
     int now = (rot == 90 || rot == 270) ? targetH_ : targetW_;
     int noh = (rot == 90 || rot == 270) ? targetW_ : targetH_;
     if (ow_ != now || oh_ != noh || rot_ != rot) {
@@ -113,6 +160,7 @@ bool VideoSink::ensure(const AVFrame *f) {
 
 bool VideoSink::WriteFrame(const AVFrame *frame) {
     uint64_t t0 = stats::enabled() ? stats::nowUs() : 0;   // convert + transform + softcam push cost
+    if (awaitingPhoneGeometry()) { ++frames_; return true; }   // decode already happened; just don't size yet
     if (!ensure(frame)) return false;
     bool previewWanted = wantPreview_ && g_previewVisible.load();
 #ifdef HAVE_SOFTCAM
@@ -181,4 +229,5 @@ void VideoSink::Stop() {
     if (cam_) { softcam::sender::DeleteCamera(cam_); cam_ = nullptr; }
 #endif
     srcW_ = srcH_ = targetW_ = targetH_ = ow_ = oh_ = rot_ = 0;
+    firstFrameUs_ = 0;
 }

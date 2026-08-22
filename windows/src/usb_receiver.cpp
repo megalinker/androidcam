@@ -286,7 +286,13 @@ void session(SOCKET s, const UsbRecvConfig &cfg, std::atomic<bool> *running) {
             pq.push(payload.data(), len);
         } else if (type == phonestatus::kUsbStatusType) {
             PhoneStatusMsg st = phonestatus::parse(std::string((char *)payload.data(), payload.size()));
-            if (st.valid) { ++statusMsgs; phonestatus::emit(st); }
+            if (st.valid) {
+                ++statusMsgs;
+                phonestatus::emit(st);
+                // The phone stopped rotating its own frames (it costs it ~6-42 CPU points);
+                // it now tells us the angle and its capture geometry, and we apply both here.
+                VideoSetPhoneGeometry(st.videoW, st.videoH, st.rotation);
+            }
         }
 
         // --- outbound control, driven off the same thread so the socket has a single writer ---
